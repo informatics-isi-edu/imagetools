@@ -16,7 +16,6 @@ vips_cmd = '/usr/local/bin/vips'
 magick_cmd = '/usr/local/bin/magick'
 identify_cmd = '/usr/local/bin/identify'
 
-czifile = '/Users/carl/Repos/Projects/imagetools/20160707-hKDCS19_133-JAM-0-30-000.czi'
 bf_env = {'BF_MAX_MEM': '10g'}
 
 def czi_to_ome(czifile, overwrite=False):
