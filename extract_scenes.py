@@ -16,6 +16,7 @@ vips_cmd = '/usr/local/bin/vips'
 magick_cmd = '/usr/local/bin/magick'
 identify_cmd = '/usr/local/bin/identify'
 
+czifile = '/Users/carl/Repos/Projects/imagetools/20160707-hKDCS19_133-JAM-0-30-000.czi'
 bf_env = {'BF_MAX_MEM': '10g'}
 
 def czi_to_ome(czifile, overwrite=False):
@@ -134,11 +135,26 @@ def czi_coords(file):
                 (stage_lable['X'], stage_lable['Y']), []) + [id]
     return [i for i in scenes.values()]
 
+def deepzoom(czifile):
+    filename, ext = os.path.splitext(czifile)
+    scenes, pyramids = czi_scenes(filename)
+    for scene, series in enumerate(scenes):
+        print('Converting scene ', scene, 'to compressed TIFF')
+
+        # VIPS conversion is much faster.....
+        vips_convert = [
+            vips_cmd, 'dzsave',
+            '{}-{}.ome.tif'.format(filename, scene),
+            '{}-{}.dzi'.format(filename, scene),
+            '--tile-width', '256', '--tile-height', '256'
+        ]
+        result = subprocess.run(vips_convert,check=True)
+
 
 def main(czifile, overwrite=False):
     czi_to_ome(czifile, overwrite)
     split_czi_scenes(czifile, overwrite)
-    seadragon_tiffs(czifile, overwrite)
+    seadragon_tiffs(czifile)
 
 if __name__ == '__main__':
     sys.exit(main(sys.argv[1]))
