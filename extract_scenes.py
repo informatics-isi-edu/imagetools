@@ -122,18 +122,19 @@ def czi_coords(file):
     ns = '{http://www.openmicroscopy.org/Schemas/OME/2016-06}'
     image_tag = ns + 'Image'
     stage_lable_tag = ns + 'StageLabel'
+    pixels_tag = ns + 'Pixels'
+
     result = subprocess.run([tiffcomment_cmd, ometiff], stdout=subprocess.PIPE)
     metadata = ET.fromstring(result.stdout)
-    scenes = {}
+    coords = {}
     for image in metadata.iter(image_tag):
-        print(image)
-        id = image.attrib['ID'].split(':')[1]
-        stage_lable = image.find(stage_lable_tag)
-        if stage_lable is not None:
-            stage_lable = stage_lable.attrib
-            scenes[(stage_lable['X'], stage_lable['Y'])] = scenes.get(
-                (stage_lable['X'], stage_lable['Y']), []) + [id]
-    return [i for i in scenes.values()]
+        print(image.get('ID'), image.get('Name'))
+        stage_element = image.find(stage_lable_tag)
+        pixels_element = image.find(pixels_tag)
+        stage_label = stage_element.attrib if stage_element is not None else {}
+        pixels = pixels_element.attrib if pixels_element is not None else {}
+        coords[image.get('Name')] = {'stage': stage_label, 'pixels': pixels}
+    return coords
 
 def deepzoom(czifile):
     filename, ext = os.path.splitext(czifile)
