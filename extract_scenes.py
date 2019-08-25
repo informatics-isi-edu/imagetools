@@ -128,7 +128,6 @@ def czi_coords(file):
     metadata = ET.fromstring(result.stdout)
     coords = {}
     for image in metadata.iter(image_tag):
-        print(image.get('ID'), image.get('Name'))
         stage_element = image.find(stage_lable_tag)
         pixels_element = image.find(pixels_tag)
         stage_label = stage_element.attrib if stage_element is not None else {}
