@@ -65,6 +65,7 @@ def czi_scenes(filename):
         #sys.exit(1)
 
     scenes = []
+    channels = []
 
     for i in result.stdout.splitlines():
         if 'Series count' in i:
@@ -78,11 +79,11 @@ def czi_scenes(filename):
             scenes.append(series)
         if 'Information|Image|Channel|Name' in i:
             # Information|Image|Channel
-            # Channel names may be in a list.
+            # Channel names may be in a list or they may be a single channel name.
             s = re.search('Name.*: *\[?(.+)\]?', i)
-            channels = [i.strip() for i in s.group(1).split(',')]
+            channels.extend([i.strip() for i in s.group(1).split(',')])
         if 'Information|Image|SizeZ' in i:
-            s = re.search('\|SizeZ.*: *\[?(.+)\]?', i)
+            s = re.search('\|SizeZ.*: *\[?([^\]]+)\]?', i)
             z = int(s.group(1))
 
     resolutions = [v - scenes[c] for c, v in enumerate(scenes[1:])]
@@ -182,7 +183,6 @@ def czi_coords(file):
 
 
 def main(czifile, overwrite=False):
-    czi_to_ome(czifile, overwrite)
     seadragon_tiffs(czifile, overwrite)
 
 if __name__ == '__main__':
