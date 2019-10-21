@@ -97,14 +97,17 @@ def czi_scenes(filename):
 def seadragon_tiffs(czifile, overwrite=False, delete_ome=True):
 
     filename, ext = os.path.splitext(czifile)
+    try:
+        os.mkdir(filename)
+    except FileExistsError:
+        pass
+
     filename = filename + '/' + filename
 
     try:
         os.mkdir(filename)
     except FileExistsError:
         pass
-
-    tiff_file = filename + '.ome.tif'
 
     scenes, pyramids, channels, z = czi_scenes(czifile)
 
