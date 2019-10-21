@@ -104,11 +104,6 @@ def seadragon_tiffs(czifile, overwrite=False, delete_ome=True):
 
     filename = filename + '/' + filename
 
-    try:
-        os.mkdir(filename)
-    except FileExistsError:
-        pass
-
     scenes, pyramids, channels, z = czi_scenes(czifile)
 
     # Pick the slice in the middle, if there is a Z stack.
