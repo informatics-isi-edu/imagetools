@@ -4,9 +4,13 @@ import tifffile
 import os
 import re
 import sys
+import math
 
 import subprocess
-import ast
+import logging
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 tiffcomment_cmd = '/opt/local/bin/bftools/tiffcomment'
 bfconvert_cmd = '/opt/local/bin/bftools/bfconvert'
@@ -21,34 +25,40 @@ bf_env = {'BF_MAX_MEM': '10g'}
 
 def czi_to_ome(czifile, overwrite=False):
     filename, ext = os.path.splitext(czifile)
+    try:
+        os.mkdir(filename)
+    except FileExistsError:
+        pass
+
     # Convert the entire czi to an omi tiff.
-    print('Converting CZI to OME TIF')
+
+    logger.info('Converting CZI to OME TIF')
     result = subprocess.run([
         bfconvert_cmd, '-overwrite' if overwrite else '-nooverwrite', '-noflat', '-bigtiff',
-        czifile, filename + '.ome.tif'
+        czifile, filename + '/' + filename + '.ome.tif'
     ],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        universal_newlines=True,
         env=bf_env)
+    logger.info(result.stdout)
     if result.returncode != 0:
-        print('CZI conversion failed')
+        logger.info('CZI conversion failed')
         sys.exit(1)
 
-def czi_scenes(czifile):
+def czi_scenes(filename):
     """
     Figure out the number of scenes in the CZI, the starting location, and the number resolutions within the scene.
 
     :param filename:
     :return:
     """
-    if 'ome.tif' in czifile:
-        [filename,ext] = czifile.split('.ome.tif')
-    else:
-        filename, ext = os.path.splitext(czifile)
 
     # Figure out the number of scenes in the czi and the starting location for each scene.
-    print("Calculating scene positions....")
-    result = subprocess.run([showinf_cmd, '-nopix', filename + '.ome.tif'], stdout=subprocess.PIPE,
+    logger.info("Calculating scene positions....")
+    result = subprocess.run([showinf_cmd, '-nopix', filename], stdout=subprocess.PIPE,
                             universal_newlines=True,
-                            env=bf_env)
+                            env=bf_env, stderr=subprocess.PIPE)
+    logger.info(result.stderr)
 
     if result.returncode != 0:
         print('Scene calculation failed')
@@ -60,108 +70,110 @@ def czi_scenes(czifile):
         if 'Series count' in i:
             s = re.search('Series count = ([0-9]+)', i)
             series_count = int(s.group(1))
-            print("Series count is {}".format(series_count))
+            logger.info("Series count is {}".format(series_count))
         if 'Scene #' in i:
-            print(i)
+            logger.info(i)
             s = re.search('\|Series ([0-9]+)\|', i)
             series = int(s.group(1)) - 1
             scenes.append(series)
         if 'Information|Image|Channel|Name' in i:
             # Information|Image|Channel
-            s = re.search('\|Name: *\[(.+)\]', i)
+            # Channel names may be in a list.
+            s = re.search('Name.*: *\[?(.+)\]?', i)
             channels = [i.strip() for i in s.group(1).split(',')]
+        if 'Information|Image|SizeZ' in i:
+            s = re.search('\|SizeZ.*: *\[?(.+)\]?', i)
+            z = int(s.group(1))
 
     resolutions = [v - scenes[c] for c, v in enumerate(scenes[1:])]
-    print('Number of scenes is {}'.format(len(scenes)))
+    logger.info('Number of scenes is {}'.format(len(scenes)))
 
     # The pyramids in the last scene is determined by the total number of images, leaving out the thumbnail and label.
     if len(scenes) == 0:
         scenes = [0]
     resolutions.append((series_count - 2) - scenes[-1])
-    return scenes, resolutions, channels
+    return scenes, resolutions, channels, z
 
+def seadragon_tiffs(czifile, overwrite=False, delete_ome=True):
 
-def split_czi_scenes(czifile, overwrite=False):
-    """
-    Split a CZI file into a set of seperate OME-TIFF files, with one scene per file.
-    :param filename:
-    :param overwrite:
-    :return:
-    """
+    filename, ext = os.path.splitext(czifile)
+    filename = filename + '/' + filename
 
-    if 'ome.tif' in czifile:
-        [filename, ext] = czifile.split('.ome.tif')
-    else:
-        filename, ext = os.path.splitext(czifile)
+    try:
+        os.mkdir(filename)
+    except FileExistsError:
+        pass
 
-    scenes, pyramids, channels = czi_scenes(filename)
+    tiff_file = filename + '.ome.tif'
 
-    file = filename + '.ome.tif'
+    scenes, pyramids, channels, z = czi_scenes(czifile)
 
-    print(scenes)
-    # Create an omi tiff that has just one scene in it.
-    for scene, series in enumerate(scenes):
-        print('Converting scene ', scene, series, 'to OME Tif')
-        result = subprocess.run([bfconvert_cmd, '-series', str(scene),
-                                 #                           '-noflat', '-pyramid-resolutions', str(pyramids[scene]), '-pyramid-scale', '2',
-                                 '-overwrite' if overwrite else '-nooverwrite',
-                                 file,
-                                 '{}-{}.ome.tif'.format(filename, scene)],
-                                env=bf_env, check=True)
-        # Now split out channels.
-        print('Splitting out channels....')
-        result = subprocess.run([bfconvert_cmd, #'-series', str(scene),
-                                 #                           '-noflat', '-pyramid-resolutions', str(pyramids[scene]), '-pyramid-scale', '2',
-                                 '-overwrite' if overwrite else '-nooverwrite',
-                                 '{}-{}.ome.tif'.format(filename, scene),
-                                 '{}-%w-{}.ome.tif'.format(filename, scene)],
-                                env=bf_env, check=True)
+    # Pick the slice in the middle, if there is a Z stack.
+    z_plane = int(math.ceil(z/2) - 1)
 
-
-def seadragon_tiffs(filename):
-
-    if 'ome.tif' in czifile:
-        [filename, ext] = czifile.split('.ome.tif')
-    else:
-        filename, ext = os.path.splitext(czifile)
-
-    scenes, pyramids, channels = czi_scenes(filename)
     # Create a non-ome tiff pyramid version of the file optimized for open sea dragon.
     for scene, series in enumerate(scenes):
-        for channel in channels:
-            print('Converting scene ', channel, scene, 'to compressed TIFF')
+        for channel, channel_name in enumerate(channels):
+            logger.info('Splitting out scene Scene:{} Series:{} Channel: {}|{} Z:{} to OME TIFF'.format(scene, series, channel, channel_name, z_plane))
+            # First we pull out the single image that is the specified channel from the scene at highest resolution.
+            # This will be the first image in the series.
 
-            # VIPS conversion is much faster.....
+            ome_tiff = '{}-{}-{}-{}.ome.tif'.format(filename, scene, channel, z_plane)
+
+            result = subprocess.run([bfconvert_cmd,
+                                     '-series', str(scene),
+                                     '-z', str(z_plane),
+                                     '-overwrite' if overwrite else '-nooverwrite'
+                                     ] +
+                                    # Seems that bfconvert doesn't like asking for a channel if there is only one....
+                                    (['-channel', str(channel)] if len(channels) > 1 else []) +
+                                    [czifile, ome_tiff],
+                                    env=bf_env, check=True,
+                                    stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT, universal_newlines=True)
+            logger.info(result.stdout)
+
+            logger.info('Converting scene {} {} {} to compressed TIFF'.format(series, channel, z_plane))
+
+            # Now convert this single image to a pyramid with 256x256 jpeg compressed tiles, which is going to be
+            # good for openseadragon.
             vips_convert = [
                 vips_cmd, 'tiffsave',
-                '{}-{}-{}.ome.tif'.format(filename, channel, scene),
-                '{}-{}-{}.tif'.format(filename, channel, scene),
+                ome_tiff,
+                '{}-{}-{}.tif'.format(filename, scene, channel_name.replace(' ','_')),
                 '--tile', '--pyramid', '--compression', 'jpeg',
                 '--tile-width', '256', '--tile-height', '256'
             ]
 
-            magick_convert = [
-                magick_cmd, 'convert',
-                '{}-{}.ome.tif'.format(filename, scene),
-                '-define', 'tiff:tile-geometry=256x256',
-                '-compress', 'jpeg',
-                'ptif:{}-{}.tif'.format(filename, scene)
-            ]
-
-            result = subprocess.run(vips_convert, check=True)
+            result = subprocess.run(vips_convert, check=True,
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+            logger.info(result.stdout)
+            if delete_ome:
+                os.remove(ome_tiff)
 
 
 def czi_coords(file):
-    filename, ext = os.path.splitext(file)
+
+    if 'ome.tif' in czifile:
+        [filename, ext] = czifile.split('.ome.tif')
+    else:
+        filename, ext = os.path.splitext(czifile)
+
     ometiff = filename + '.ome.tif'
     ns = '{http://www.openmicroscopy.org/Schemas/OME/2016-06}'
     image_tag = ns + 'Image'
     stage_lable_tag = ns + 'StageLabel'
     pixels_tag = ns + 'Pixels'
+    channel_tag = ns + 'Channel'
 
     result = subprocess.run([tiffcomment_cmd, ometiff], stdout=subprocess.PIPE)
     metadata = ET.fromstring(result.stdout)
     coords = {}
+    for image in metadata.iter(image_tag):
+        print(image.tag, image.attrib)
+        channels = [channel.attrib['Name'] for channel in image.iter(channel_tag)]
+        print(channels)
+
     for image in metadata.iter(image_tag):
         stage_element = image.find(stage_lable_tag)
         pixels_element = image.find(pixels_tag)
@@ -170,26 +182,10 @@ def czi_coords(file):
         coords[image.get('Name')] = {'stage': stage_label, 'pixels': pixels}
     return coords
 
-def deepzoom(czifile):
-    filename, ext = os.path.splitext(czifile)
-    scenes, pyramids = czi_scenes(filename)
-    for scene, series in enumerate(scenes):
-        print('Converting scene ', scene, 'to compressed TIFF')
-
-        # VIPS conversion is much faster.....
-        vips_convert = [
-            vips_cmd, 'dzsave',
-            '{}-{}.ome.tif'.format(filename, scene),
-            '{}-{}.dzi'.format(filename, scene),
-            '--tile-width', '256', '--tile-height', '256'
-        ]
-        result = subprocess.run(vips_convert,check=True)
-
 
 def main(czifile, overwrite=False):
     czi_to_ome(czifile, overwrite)
-    split_czi_scenes(czifile, overwrite)
-    seadragon_tiffs(czifile)
+    seadragon_tiffs(czifile, overwrite)
 
 if __name__ == '__main__':
     sys.exit(main(sys.argv[1]))
