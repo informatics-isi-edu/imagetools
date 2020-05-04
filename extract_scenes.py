@@ -195,6 +195,7 @@ def seadragon_tiffs(image_path, overwrite=False, delete_ome=False):
 
             if delete_ome:
                 pass
+    return series_list, channel_list
 
 
 def czi_coords(file):
