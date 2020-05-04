@@ -1,6 +1,5 @@
 
 import xml.etree.ElementTree as ET
-#import tifffile
 import os
 import re
 import sys
@@ -15,12 +14,11 @@ logger.setLevel(logging.INFO)
 
 bfconvert_cmd = '/usr/local/bin/bftools/bfconvert'
 showinf_cmd = '/usr/local/bin/bftools/showinf'
+tiffcomment_cmd = '/usr/local/bin/bftools/tiffcomment'
 vips_cmd = '/usr/local/bin/vips'
 
 magick_cmd = '/usr/local/bin/magick'
 identify_cmd = '/usr/local/bin/identify'
-
-imagedir = '/Users/carl/insync/carl@usc.edu/Google Drive/USC/Projects/ImageStuff/'
 
 bf_env = {'BF_MAX_MEM': '10g'}
 
@@ -128,8 +126,7 @@ def ome_tiff_filename(file, series, channel, z):
                                             0 if series['SizeZ'] == 1 else '%z'))
 
 
-def split_tiff(imagefile, ometiff_file, series=None, z=None, channel=None, overwrite=False):
-
+def split_tiff(imagefile, ometiff_file, series=None, z=None, channel=None, compress=True, overwrite=False):
     # Create template of output file.  If Z or Channel are none, use the implicit file splitting in bfconvert.
     # If a value for C or Z is not provided and there is only one channel or Z plane, then omit argument, otherwise
     # use the %c or %z to get bfconvert to do the splitting and filenaming.
@@ -137,10 +134,14 @@ def split_tiff(imagefile, ometiff_file, series=None, z=None, channel=None, overw
     bfconvert_args = ['-overwrite' if overwrite else '-nooverwrite']
     if series is not None:
         bfconvert_args.extend(['-series', str(series['Flattened series'])])
-    if channel is not None and (series['SizeC'] >1):
+    if channel is not None and (series['SizeC'] > 1):
         bfconvert_args.extend(['-channel', str(channel)])
     if z is not None and (series['SizeZ'] > 1):
-       bfconvert_args.extend(['-z', str(z)])
+        bfconvert_args.extend(['-z', str(z)])
+
+    # Use compression.
+    if compress:
+        bfconvert_args.extend(['-compression', 'LZW' if compress is True else compress])
 
     result = subprocess.run([bfconvert_cmd] + bfconvert_args + [imagefile, split_ome_tiff],
                             env=bf_env, check=True,
@@ -153,6 +154,7 @@ def split_tiff(imagefile, ometiff_file, series=None, z=None, channel=None, overw
         raise subprocess.CalledProcessError(cmd=showinf_cmd,
                                             returncode=result.returncode,
                                             stderr=result.stderr)
+
 
 def seadragon_tiffs(image_path, overwrite=False, delete_ome=False):
     image_file = os.path.basename(image_path)
@@ -174,7 +176,7 @@ def seadragon_tiffs(image_path, overwrite=False, delete_ome=False):
 
         # Now convert this single image to a pyramid with 256x256 jpeg compressed tiles, which is going to be
         # good for openseadragon.
-        for channel in  range(series['SizeC']):
+        for channel in range(series['SizeC']):
             logger.info('Converting scene {} {} {} to compressed TIFF'.format(series['Number'], channel, z_plane))
 
             vips_convert = [
@@ -194,12 +196,13 @@ def seadragon_tiffs(image_path, overwrite=False, delete_ome=False):
             if delete_ome:
                 pass
 
+
 def czi_coords(file):
 
-    if 'ome.tif' in czifile:
-        [filename, ext] = czifile.split('.ome.tif')
+    if 'ome.tif' in file:
+        [filename, _] = file.split('.ome.tif')
     else:
-        filename, ext = os.path.splitext(czifile)
+        filename, ext = os.path.splitext(file)
 
     ometiff = filename + '.ome.tif'
     ns = '{http://www.openmicroscopy.org/Schemas/OME/2016-06}'
@@ -228,8 +231,7 @@ def czi_coords(file):
 def main(imagefile, overwrite=False):
     seadragon_tiffs(imagefile, overwrite=overwrite)
 
+
 if __name__ == '__main__':
     sys.exit(main(sys.argv[1]))
-
-
 
