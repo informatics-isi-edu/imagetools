@@ -127,6 +127,18 @@ def ome_tiff_filename(file, series, channel, z):
 
 
 def split_tiff(imagefile, ometiff_file, series=None, z=None, channel=None, compress=True, overwrite=False):
+    """
+
+    :param imagefile: Path of the file which contains the input data. Can be any image formate recognized by bioformats.
+    :param ometiff_file: Path to output file.  Needs to be an OME-TIFF file.
+    :param series: Series number to extract from converted OME-TIF file. If None, extract all series.
+    :param z: Z plane to extract. If None extract all Z planes.
+    :param channel:
+    :param compress:
+    :param overwrite:
+    :return:
+    """
+
     # Create template of output file.  If Z or Channel are none, use the implicit file splitting in bfconvert.
     # If a value for C or Z is not provided and there is only one channel or Z plane, then omit argument, otherwise
     # use the %c or %z to get bfconvert to do the splitting and filenaming.
@@ -156,7 +168,16 @@ def split_tiff(imagefile, ometiff_file, series=None, z=None, channel=None, compr
                                             stderr=result.stderr)
 
 
-def seadragon_tiffs(image_path, overwrite=False, delete_ome=False):
+def seadragon_tiffs(image_path, z_planes=None, overwrite=False, delete_ome=False):
+    """
+
+    :param image_path: Input image file in any format recognized by bioformats
+    :param z_planes: Which z_plane to select.  If None, output complete Z-stack, if 'middle' output representitive plane.
+    :param overwrite:
+    :param delete_ome:
+    :return:
+    """
+
     image_file = os.path.basename(image_path)
     filename, ext = os.path.splitext(image_file)
     try:
@@ -170,22 +191,25 @@ def seadragon_tiffs(image_path, overwrite=False, delete_ome=False):
 
     # Create a non-ome tiff pyramid version of the file optimized for open sea dragon.
     for series in series_list:
-        # Pick the slice in the middle, if there is a Z stack.
-        z_plane = int(math.ceil(series['SizeZ'] / 2) - 1)
-        split_tiff(image_path, filename, series=series, z=z_plane, overwrite=overwrite)
+        # Pick the slice in the middle, if there is a Z stack and z_plane is  'middle'
+        z_plane = int(math.ceil(series['SizeZ'] / 2) - 1) if z_planes == 'middle' else z_planes
+        split_tiff(image_path, filename, series=series,
+                   z=z_plane,
+                   overwrite=overwrite)
 
         # Now convert this single image to a pyramid with 256x256 jpeg compressed tiles, which is going to be
-        # good for openseadragon.
+        # good for openseadragon.  Need to itereate over each channel and z-plane
         for channel in range(series['SizeC']):
             logger.info('Converting scene {} {} {} to compressed TIFF'.format(series['Number'], channel, z_plane))
 
-            vips_convert = [
-                vips_cmd, 'tiffsave',
-                ome_tiff_filename(filename, series, channel, z_plane),
-                '{}-{}-{}.tif'.format(filename, series['Number'], channel_list[channel].replace(' ', '_')),
-                '--tile', '--pyramid', '--compression', 'jpeg',
-                '--tile-width', '256', '--tile-height', '256'
-            ]
+            for z in range(series['SizeZ']) if z_plane is None else [z_plane]:
+                vips_convert = [
+                    vips_cmd, 'tiffsave',
+                    ome_tiff_filename(filename, series, channel, z),
+                    '{}-{}-{}.tif'.format(filename, series['Number'], channel_list[channel].replace(' ', '_')),
+                    '--tile', '--pyramid', '--compression', 'jpeg',
+                    '--tile-width', '256', '--tile-height', '256'
+                ]
 
             result = subprocess.run(vips_convert, check=True,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
