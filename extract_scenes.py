@@ -211,11 +211,11 @@ def seadragon_tiffs(image_path, z_planes=None, overwrite=False, delete_ome=False
                     '--tile-width', '256', '--tile-height', '256'
                 ]
 
-            result = subprocess.run(vips_convert, check=True,
-                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
-            logger.info(result.stdout)
-            if result.returncode != 0:
-                logger.info('Tiff extraction failed')
+                result = subprocess.run(vips_convert, check=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+                logger.info(result.stdout)
+                if result.returncode != 0:
+                    logger.info('Tiff extraction failed')
 
             if delete_ome:
                 pass
