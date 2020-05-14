@@ -118,7 +118,7 @@ def image_file_contents(filename, noflat=True):
 
 
 def ome_tiff_filename(file, series, channel, z):
-    return '{}-{}-{}-{}.ome.tif'.format(file,
+    return '{}-Series_{}-Channel_{}-Z_{}.ome.tif'.format(file,
                                         series['Number'] if series is not None else "%s",
                                         channel if channel is not None else (
                                             0 if series['SizeC'] == 1 else '%c'),
@@ -206,7 +206,7 @@ def seadragon_tiffs(image_path, z_planes=None, overwrite=False, delete_ome=False
                 vips_convert = [
                     vips_cmd, 'tiffsave',
                     ome_tiff_filename(filename, series, channel, z),
-                    '{}-{}-{}.tif'.format(filename, series['Number'], channel_list[channel].replace(' ', '_')),
+                    '{}-Series_{}-{}-Z_{}.tif'.format(filename, series['Number'], channel_list[channel].replace(' ', '_'), z),
                     '--tile', '--pyramid', '--compression', 'jpeg',
                     '--tile-width', '256', '--tile-height', '256'
                 ]
