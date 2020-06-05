@@ -22,6 +22,9 @@ identify_cmd = '/usr/local/bin/identify'
 
 bf_env = {'BF_MAX_MEM': '10g'}
 
+ns = {'': 'http://www.openmicroscopy.org/Schemas/OME/2016-06',
+      'xsi': "http://www.w3.org/2001/XMLSchema-instance"}
+
 def image_file_contents(filename, noflat=True):
     """
     Figure out the structure of the image file including the number of images in the file (.e.g. series) and the
@@ -64,9 +67,7 @@ def image_file_contents(filename, noflat=True):
         raise subprocess.CalledProcessError(cmd=showinf_cmd,
                                             returncode=result.returncode,
                                             stderr=result.stderr)
-
     images = []
-    channels = []
 
     parsing_series = False
     for i in result.stdout.splitlines():
@@ -89,17 +90,14 @@ def image_file_contents(filename, noflat=True):
             if not series['Thumbnail series']:
                 images.append(series)
             parsing_series = False
-        if 'Information|Image|Channel|Name' in i:
-            logger.debug(i)
-            # Information|Image|Channel
-            # Channel names may be in a list or they may be a single channel name.
-            s = re.search('Name.*: *\[?(.+)\]?', i)
-            channels.extend([i.strip() for i in s.group(1).split(',')])
         if '<OME' in i:
             # Stop once you get to the XML part of the data.
             break
 
     # Now get the OME-XML version.
+    ET.register_namespace('','http://www.openmicroscopy.org/Schemas/OME/2016-06')
+    ET.register_namespace('xsi',"http://www.w3.org/2001/XMLSchema-instance")
+
     metadata = ET.fromstring(result.stdout[result.stdout.find('<OME'):])
 
     logger.info('Number of series is {}'.format(len(images)))
@@ -111,10 +109,11 @@ def image_file_contents(filename, noflat=True):
         i['Flattened series'] = offset
         offset = offset + resolutions
 
-    if len(channels) < images[0]['SizeC']:
-        channels.extend(['Channel {}'.format(i) for i in range(images[0]['SizeC'] - len(channels))])
+    # Go through the XML and collect up information about channels for each image.
+    for i,e in zip(images, metadata.findall('Image', ns)):
+        i['Channels'] = [ c.attrib for c in e.findall('./Pixels/Channel',ns)]
 
-    return images, channels, metadata
+    return images, metadata
 
 
 def ome_tiff_filename(file, series, channel, z):
@@ -187,7 +186,7 @@ def seadragon_tiffs(image_path, z_planes=None, overwrite=False, delete_ome=False
 
     filename = filename + '/' + filename
 
-    series_list, channel_list, _ = image_file_contents(image_path)
+    series_list, _ = image_file_contents(image_path)
 
     # Create a non-ome tiff pyramid version of the file optimized for open sea dragon.
     for series in series_list:
@@ -199,14 +198,18 @@ def seadragon_tiffs(image_path, z_planes=None, overwrite=False, delete_ome=False
 
         # Now convert this single image to a pyramid with 256x256 jpeg compressed tiles, which is going to be
         # good for openseadragon.  Need to itereate over each channel and z-plane
+        channel_list = series['Channels']
         for channel in range(series['SizeC']):
+            # Get the channel name out of the info we have for the channel, use the ID if there is no name.
+            channel_name = channel_list[channel].get('Name', channel_list[channel]['ID'])
+            channel_name = channel_name.replace(" ", "_")
             logger.info('Converting scene {} {} {} to compressed TIFF'.format(series['Number'], channel, z_plane))
 
             for z in range(series['SizeZ']) if z_plane is None else [z_plane]:
                 vips_convert = [
                     vips_cmd, 'tiffsave',
                     ome_tiff_filename(filename, series, channel, z),
-                    '{}-Series_{}-{}-Z_{}.tif'.format(filename, series['Number'], channel_list[channel].replace(' ', '_'), z),
+                    '{}-Series_{}-{}-Z_{}.tif'.format(filename, series['Number'], channel_name, z),
                     '--tile', '--pyramid', '--compression', 'jpeg',
                     '--tile-width', '256', '--tile-height', '256'
                 ]
