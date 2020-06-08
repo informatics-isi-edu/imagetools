@@ -47,10 +47,12 @@ def image_file_contents(filename, noflat=True):
         if 'effectively 1' in x:
             return 1
         try:
-            if int(x):
-                return int(x)
+            return int(x)
         except ValueError:
-            return x
+            try:
+                return float(x)
+            except ValueError:
+                return x
 
     logger.info("Getting file metadata....")
     showinf_args = ['-nopix', '-omexml'] + (['-noflat'] if noflat else [])
@@ -101,20 +103,20 @@ def image_file_contents(filename, noflat=True):
         offset = offset + resolutions
 
     # Now get the OME-XML version.
-    ome = 'http://www.openmicroscopy.org/Schemas/OME/2016-06'
-    image_tag = '{' + ome + '}Image'
-    pixel_tag = '{' + ome + '}Pixels'
-    channel_tag = '{' + ome + '}Channel'
-
-    ns = {'': 'http://www.openmicroscopy.org/Schemas/OME/2016-06',
+    ns = {'ome': 'http://www.openmicroscopy.org/Schemas/OME/2016-06',
           'xsi': "http://www.w3.org/2001/XMLSchema-instance"}
 
     metadata = ET.fromstring(result.stdout[result.stdout.find('<OME'):])
 
     # Go through the XML and collect up information about channels for each image.
-    for i, e in zip(images, metadata.findall(image_tag, ns)):
-        i['Channels'] = [c.attrib for c in e.findall('./' + pixel_tag + '/' + channel_tag, ns)]
+    for i, e in zip(images, metadata.findall('ome:Image', ns)):
+        # Add in attributes of Pixels element.
+        pixels = e.find('./ome:Pixels', ns)
+        i.update(** {k: map_value(v) for k, v in pixels.attrib.items()})
 
+        # Now add in the details about the channels
+        i['Channels'] = [{k: map_value(v) for k,v in c.attrib.items() }
+                          for c in pixels.findall('./ome:Channel', ns)]
     return images, metadata
 
 
