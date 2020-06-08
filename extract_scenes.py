@@ -22,8 +22,6 @@ identify_cmd = '/usr/local/bin/identify'
 
 bf_env = {'BF_MAX_MEM': '10g'}
 
-ns = {'': 'http://www.openmicroscopy.org/Schemas/OME/2016-06',
-      'xsi': "http://www.w3.org/2001/XMLSchema-instance"}
 
 def image_file_contents(filename, noflat=True):
     """
@@ -43,16 +41,16 @@ def image_file_contents(filename, noflat=True):
             return True
         elif x == 'false':
             return False
-        m = re.search('([0-9]+) x ([0-9]+)',x)
+        m = re.search('([0-9]+) x ([0-9]+)', x)
         if m:
-            return (int(m.group(1)), int(m.group(2)))
+            return int(m.group(1)), int(m.group(2))
         if 'effectively 1' in x:
             return 1
         try:
             if int(x):
                 return int(x)
         except ValueError:
-           return x
+            return x
 
     logger.info("Getting file metadata....")
     showinf_args = ['-nopix', '-omexml'] + (['-noflat'] if noflat else [])
@@ -71,7 +69,7 @@ def image_file_contents(filename, noflat=True):
 
     parsing_series = False
     for i in result.stdout.splitlines():
-        i = i.lstrip() # Remove formatting characters.
+        i = i.lstrip()  # Remove formatting characters.
         if 'Series #' in i:
             logger.debug(i)
             series = {}
@@ -93,13 +91,6 @@ def image_file_contents(filename, noflat=True):
         if '<OME' in i:
             # Stop once you get to the XML part of the data.
             break
-
-    # Now get the OME-XML version.
-    ET.register_namespace('','http://www.openmicroscopy.org/Schemas/OME/2016-06')
-    ET.register_namespace('xsi',"http://www.w3.org/2001/XMLSchema-instance")
-
-    metadata = ET.fromstring(result.stdout[result.stdout.find('<OME'):])
-
     logger.info('Number of series is {}'.format(len(images)))
 
     # Calculate what the corrisponding series number would be if the noflat option was not used.
@@ -109,9 +100,20 @@ def image_file_contents(filename, noflat=True):
         i['Flattened series'] = offset
         offset = offset + resolutions
 
+    # Now get the OME-XML version.
+    ome = 'http://www.openmicroscopy.org/Schemas/OME/2016-06'
+    image_tag = '{' + ome + '}Image'
+    pixel_tag = '{' + ome + '}Pixels'
+    channel_tag = '{' + ome + '}Channel'
+
+    ns = {'': 'http://www.openmicroscopy.org/Schemas/OME/2016-06',
+          'xsi': "http://www.w3.org/2001/XMLSchema-instance"}
+
+    metadata = ET.fromstring(result.stdout[result.stdout.find('<OME'):])
+
     # Go through the XML and collect up information about channels for each image.
-    for i,e in zip(images, metadata.findall('Image', ns)):
-        i['Channels'] = [ c.attrib for c in e.findall('./Pixels/Channel',ns)]
+    for i, e in zip(images, metadata.findall(image_tag, ns)):
+        i['Channels'] = [c.attrib for c in e.findall('./' + pixel_tag + '/' + channel_tag, ns)]
 
     return images, metadata
 
@@ -222,39 +224,7 @@ def seadragon_tiffs(image_path, z_planes=None, overwrite=False, delete_ome=False
 
             if delete_ome:
                 pass
-    return series_list, channel_list
-
-
-def czi_coords(file):
-
-    if 'ome.tif' in file:
-        [filename, _] = file.split('.ome.tif')
-    else:
-        filename, ext = os.path.splitext(file)
-
-    ometiff = filename + '.ome.tif'
-    ns = '{http://www.openmicroscopy.org/Schemas/OME/2016-06}'
-    image_tag = ns + 'Image'
-    stage_lable_tag = ns + 'StageLabel'
-    pixels_tag = ns + 'Pixels'
-    channel_tag = ns + 'Channel'
-
-    result = subprocess.run([tiffcomment_cmd, ometiff], stdout=subprocess.PIPE)
-    metadata = ET.fromstring(result.stdout)
-    coords = {}
-    for image in metadata.iter(image_tag):
-        print(image.tag, image.attrib)
-        channels = [channel.attrib['Name'] for channel in image.iter(channel_tag)]
-        print(channels)
-
-    for image in metadata.iter(image_tag):
-        stage_element = image.find(stage_lable_tag)
-        pixels_element = image.find(pixels_tag)
-        stage_label = stage_element.attrib if stage_element is not None else {}
-        pixels = pixels_element.attrib if pixels_element is not None else {}
-        coords[image.get('Name')] = {'stage': stage_label, 'pixels': pixels}
-    return coords
-
+    return series_list
 
 def main(imagefile, overwrite=False):
     seadragon_tiffs(imagefile, overwrite=overwrite)
