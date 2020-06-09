@@ -60,7 +60,8 @@ def image_file_contents(filename, noflat=True):
     result = subprocess.run([showinf_cmd] + showinf_args + [filename], stdout=subprocess.PIPE,
                             universal_newlines=True,
                             env=bf_env, stderr=subprocess.PIPE)
-    logger.info(result.stderr)
+    if result.stderr:
+        logger.info(result.stderr)
 
     if result.returncode != 0:
         logger.info('Metadata extraction failed')
@@ -162,7 +163,8 @@ def split_tiff(imagefile, ometiff_file, series=None, z=None, channel=None, compr
                             env=bf_env, check=True,
                             stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, universal_newlines=True)
-    logger.info(result.stdout)
+    if result.stdout:
+        logger.info(result.stdout)
 
     if result.returncode != 0:
         logger.info('Tiff extraction failed')
@@ -201,21 +203,21 @@ def seadragon_tiffs(image_path, z_planes=None, overwrite=False, delete_ome=False
                    overwrite=overwrite)
 
         # Now convert this single image to a pyramid with 256x256 jpeg compressed tiles, which is going to be
-        # good for openseadragon.  Need to itereate over each channel and z-plane
-        channel_list = series['Channels']
-        for channel in range(series['SizeC']):
+        # good for openseadragon.  Need to itereate over each channel and z-plane. Note that the number of "effective"
+        # channels may be different then the value of SizeC.
+        for channel_number, channel in enumerate(series['Channels']):
             # Get the channel name out of the info we have for the channel, use the ID if there is no name.
-            channel_name = channel_list[channel].get('Name', channel_list[channel]['ID'])
+            channel_name = channel.get('Name', channel['ID'])
             channel_name = channel_name.replace(" ", "_")
-            logger.info('Converting scene {} {} {} to compressed TIFF'.format(series['Number'], channel, z_plane))
+            logger.info('Converting scene {} {} {} to compressed TIFF'.format(series['Number'], channel_name, z_plane))
 
             for z in range(series['SizeZ']) if z_plane is None else [z_plane]:
                 vips_convert = [
                     vips_cmd, 'tiffsave',
-                    ome_tiff_filename(filename, series, channel, z),
+                    ome_tiff_filename(filename, series, channel_number, z),
                     '{}-Series_{}-{}-Z_{}.tif'.format(filename, series['Number'], channel_name, z),
                     '--tile', '--pyramid', '--compression', 'jpeg',
-                    '--tile-width', '256', '--tile-height', '256'
+                    '--tile-width', '512', '--tile-height', '512'
                 ]
 
                 result = subprocess.run(vips_convert, check=True,
