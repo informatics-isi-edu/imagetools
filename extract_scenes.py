@@ -84,9 +84,7 @@ def image_file_contents(filename, noflat=True):
             series[s.group(1)] = map_value(s.group(2))
         if i == '' and parsing_series:
             logger.debug(i)
-            # Don't include thumbnails in the output information
-            if not series.get('Thumbnail series', False):
-                images.append(series)
+            images.append(series)
             parsing_series = False
         if '<OME' in i:
             # Stop once you get to the XML part of the data.
@@ -117,8 +115,10 @@ def image_file_contents(filename, noflat=True):
         i.update(** {k: map_value(v) for k, v in pixels.attrib.items() if k != 'ID'})
 
         # Now add in the details about the channels
-        i['Channels'] = [{k: map_value(v) for k, v in c.attrib.items() }
+        i['Channels'] = [{k: map_value(v) for k, v in c.attrib.items()}
                           for c in pixels.findall('./ome:Channel', ns)]
+
+    images = [i for i in images if i['Name'] != 'label image']
     return images, metadata
 
 
