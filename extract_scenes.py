@@ -105,11 +105,10 @@ def image_file_contents(filename, noflat=True):
           'xsi': "http://www.w3.org/2001/XMLSchema-instance"}
 
     metadata = ET.fromstring(result.stdout[result.stdout.find('<OME'):])
-    print(metadata.find('ome:Image', ns).attrib)
+
     # Go through the XML and collect up information about channels for each image.
     for c, (i, e) in enumerate(zip(images, metadata.findall('ome:Image', ns))):
         i['Number'] = c
-        print(e.tag, e.attrib)
         i['Name'] = e.attrib['Name']
         i['ID'] = e.attrib['ID']
 
@@ -118,13 +117,13 @@ def image_file_contents(filename, noflat=True):
         i.update(** {k: map_value(v) for k, v in pixels.attrib.items() if k != 'ID'})
 
         # Now add in the details about the channels
-        i['Channels'] = [{k: map_value(v) for k,v in c.attrib.items() }
+        i['Channels'] = [{k: map_value(v) for k, v in c.attrib.items() }
                           for c in pixels.findall('./ome:Channel', ns)]
     return images, metadata
 
 
 def ome_tiff_filename(file, series, channel, z):
-    return '{}-Series_{}-Channel_{}-Z_{}.ome.tif'.format(file,
+    return '{}-Series_{}-C{}-Z{}.ome.tif'.format(file,
                                         series['Number'] if series is not None else "%s",
                                         channel if channel is not None else (
                                             0 if series['SizeC'] == 1 else '%c'),
@@ -231,6 +230,7 @@ def seadragon_tiffs(image_path, z_planes=None, overwrite=False, delete_ome=False
             if delete_ome:
                 pass
     return series_list
+
 
 def main(imagefile, overwrite=False):
     seadragon_tiffs(imagefile, overwrite=overwrite)
