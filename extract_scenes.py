@@ -73,13 +73,10 @@ def image_file_contents(filename, noflat=True):
     parsing_series = False
     for i in result.stdout.splitlines():
         i = i.lstrip()  # Remove formatting characters.
-        if 'Series #' in i:
+        if i.startswith('Series #'):
             logger.debug(i)
             series = {}
             parsing_series = True
-            s = re.search('Series #([0-9]+) -- (.*):', i)
-            series['Number'] = int(s.group(1))
-            series['Name'] = s.group(2)
             continue
         if ' = ' in i and parsing_series:
             logger.debug(i)
@@ -88,7 +85,7 @@ def image_file_contents(filename, noflat=True):
         if i == '' and parsing_series:
             logger.debug(i)
             # Don't include thumbnails in the output information
-            if not series['Thumbnail series']:
+            if not series.get('Thumbnail series', False):
                 images.append(series)
             parsing_series = False
         if '<OME' in i:
@@ -108,12 +105,17 @@ def image_file_contents(filename, noflat=True):
           'xsi': "http://www.w3.org/2001/XMLSchema-instance"}
 
     metadata = ET.fromstring(result.stdout[result.stdout.find('<OME'):])
-
+    print(metadata.find('ome:Image', ns).attrib)
     # Go through the XML and collect up information about channels for each image.
-    for i, e in zip(images, metadata.findall('ome:Image', ns)):
-        # Add in attributes of Pixels element.
+    for c, (i, e) in enumerate(zip(images, metadata.findall('ome:Image', ns))):
+        i['Number'] = c
+        print(e.tag, e.attrib)
+        i['Name'] = e.attrib['Name']
+        i['ID'] = e.attrib['ID']
+
+        # Add in attributes of Pixels element, but don't include Pixel element ID..
         pixels = e.find('./ome:Pixels', ns)
-        i.update(** {k: map_value(v) for k, v in pixels.attrib.items()})
+        i.update(** {k: map_value(v) for k, v in pixels.attrib.items() if k != 'ID'})
 
         # Now add in the details about the channels
         i['Channels'] = [{k: map_value(v) for k,v in c.attrib.items() }
