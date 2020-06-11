@@ -92,11 +92,10 @@ def image_file_contents(filename, noflat=True):
     logger.info('Number of series is {}'.format(len(images)))
 
     # Calculate what the corrisponding series number would be if the noflat option was not used.
-    resolutions = images[0].get('Resolutions', 1)
     offset = 0
     for i in images:
         i['Flattened series'] = offset
-        offset = offset + resolutions
+        offset = offset + i.get('Resolutions', 1)
 
     # Now get the OME-XML version.
     ns = {'ome': 'http://www.openmicroscopy.org/Schemas/OME/2016-06',
