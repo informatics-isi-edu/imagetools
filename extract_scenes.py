@@ -19,9 +19,7 @@ vips_cmd = '/usr/local/bin/vips'
 
 magick_cmd = '/usr/local/bin/magick'
 identify_cmd = '/usr/local/bin/identify'
-
-bf_env = {'BF_MAX_MEM': '10g'}
-
+bf_env = dict(os.environ, **{'BF_MAX_MEM': '16g'})
 
 def image_file_contents(filename, noflat=True):
     """
@@ -68,46 +66,16 @@ def image_file_contents(filename, noflat=True):
         raise subprocess.CalledProcessError(cmd=showinf_cmd,
                                             returncode=result.returncode,
                                             stderr=result.stderr)
-    images = []
 
-    parsing_series = False
-    for i in result.stdout.splitlines():
-        i = i.lstrip()  # Remove formatting characters.
-        if i.startswith('Series #'):
-            logger.debug(i)
-            series = {}
-            parsing_series = True
-            continue
-        if ' = ' in i and parsing_series:
-            logger.debug(i)
-            s = re.search('(.+) = (.+)', i)
-            series[s.group(1)] = map_value(s.group(2))
-        if i == '' and parsing_series:
-            logger.debug(i)
-            images.append(series)
-            parsing_series = False
-        if '<OME' in i:
-            # Stop once you get to the XML part of the data.
-            break
-    logger.info('Number of series is {}'.format(len(images)))
-
-    # Calculate what the corrisponding series number would be if the noflat option was not used.
-    offset = 0
-    for i in images:
-        i['Flattened series'] = offset
-        offset = offset + i.get('Resolutions', 1)
-
+    # Go through the XML and collect up information about channels for each image.
     # Now get the OME-XML version.
     ns = {'ome': 'http://www.openmicroscopy.org/Schemas/OME/2016-06',
           'xsi': "http://www.w3.org/2001/XMLSchema-instance"}
 
     metadata = ET.fromstring(result.stdout[result.stdout.find('<OME'):])
-
-    # Go through the XML and collect up information about channels for each image.
-    for c, (i, e) in enumerate(zip(images, metadata.findall('ome:Image', ns))):
-        i['Number'] = c
-        i['Name'] = e.attrib['Name']
-        i['ID'] = e.attrib['ID']
+    images = []
+    for c, e in enumerate(metadata.findall('ome:Image', ns)):
+        i = {'Number': c,  'Name': e.attrib['Name'], 'ID': e.attrib['ID']}
 
         # Add in attributes of Pixels element, but don't include Pixel element ID..
         pixels = e.find('./ome:Pixels', ns)
@@ -116,6 +84,38 @@ def image_file_contents(filename, noflat=True):
         # Now add in the details about the channels
         i['Channels'] = [{k: map_value(v) for k, v in c.attrib.items()}
                           for c in pixels.findall('./ome:Channel', ns)]
+        images.append(i)
+
+    logger.info('Number of series is {}'.format(len(images)))
+
+    # Now go though the formatted part of the file and pull out the number of resolutions.
+    parsing_series = False
+    resolutions = []
+    for i in result.stdout.splitlines():
+        i = i.lstrip()  # Remove formatting characters.
+        if i.startswith('Series #'):
+            logger.debug(i)
+            resolution = 1
+            parsing_series = True
+            continue
+        if 'Resolutions' in i and parsing_series:
+            logger.debug(i)
+            s = re.search('= (.+)', i)
+            resolution = map_value(s.group(1))
+        if i == '' and parsing_series:
+            logger.debug(i)
+            resolutions.append(resolution)
+            parsing_series = False
+        if '<OME' in i:
+            # Stop once you get to the XML part of the data.
+            break
+
+    assert(len(resolutions) == len(images))
+    # Calculate what the corrisponding series number would be if the noflat option was not used.
+    offset = 0
+    for i, r in zip(images, resolutions):
+        i['Flattened series'] = offset
+        offset = offset + r
 
     images = [i for i in images if i['Name'] != 'label image']
     return images, metadata
