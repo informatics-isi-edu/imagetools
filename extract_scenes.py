@@ -212,7 +212,7 @@ def seadragon_tiffs(image_path, z_planes=None, dump_metadata=True, overwrite=Tru
 
         if dump_metadata:
             with open('{}_s{}.json'.format(filename, series['Number']), 'w') as f:
-                json.dump(series, f)
+                f.write(json.dumps(series, indent=4))
 
 
         # Now convert this single image to a pyramid with 256x256 jpeg compressed tiles, which is going to be
