@@ -4,6 +4,7 @@ import os
 import re
 import sys
 import math
+import json
 
 import subprocess
 import logging
@@ -74,6 +75,7 @@ def image_file_contents(filename, noflat=True):
 
     metadata = ET.fromstring(result.stdout[result.stdout.find('<OME'):])
     images = []
+    print(len(metadata.findall('ome:Image', ns)))
     for c, e in enumerate(metadata.findall('ome:Image', ns)):
         i = {'Number': c,  'Name': e.attrib['Name'], 'ID': e.attrib['ID']}
 
@@ -91,19 +93,25 @@ def image_file_contents(filename, noflat=True):
     # Now go though the formatted part of the file and pull out the number of resolutions.
     parsing_series = False
     resolutions = []
+    series = 0
     for i in result.stdout.splitlines():
         i = i.lstrip()  # Remove formatting characters.
         if i.startswith('Series #'):
             logger.debug(i)
             resolution = 1
+            thumbnail_series = False
             parsing_series = True
             continue
         if 'Resolutions' in i and parsing_series:
             logger.debug(i)
             s = re.search('= (.+)', i)
             resolution = map_value(s.group(1))
+        if 'Thumbnail series' in i and parsing_series:
+            s = re.search('= (.+)', i)
+            images[series]['Thumbnail series'] = map_value(s.group(1))
         if i == '' and parsing_series:
             logger.debug(i)
+            series += 1
             resolutions.append(resolution)
             parsing_series = False
         if '<OME' in i:
@@ -173,13 +181,13 @@ def split_tiff(imagefile, ometiff_file, series=None, z=None, channel=None, compr
                                             stderr=result.stderr)
 
 
-def seadragon_tiffs(image_path, z_planes=None, overwrite=False, delete_ome=False):
+def seadragon_tiffs(image_path, z_planes=None, dump_metadata=True, overwrite=True, delete_ome=False):
     """
 
     :param image_path: Input image file in any format recognized by bioformats
     :param z_planes: Which z_plane to select.  If None, output complete Z-stack, if 'middle' output representitive plane.
     :param overwrite:
-    :param delete_ome:
+    :param delete_ome: Remove the intermediate OME-TIFF files
     :return:
     """
 
@@ -201,6 +209,11 @@ def seadragon_tiffs(image_path, z_planes=None, overwrite=False, delete_ome=False
         split_tiff(image_path, filename, series=series,
                    z=z_plane,
                    overwrite=overwrite)
+
+        if dump_metadata:
+            with open('{}_s{}.json'.format(filename, series['Number']), 'w') as f:
+                json.dump(series, f)
+
 
         # Now convert this single image to a pyramid with 256x256 jpeg compressed tiles, which is going to be
         # good for openseadragon.  Need to itereate over each channel and z-plane. Note that the number of "effective"
@@ -226,8 +239,8 @@ def seadragon_tiffs(image_path, z_planes=None, overwrite=False, delete_ome=False
                 if result.returncode != 0:
                     logger.info('Tiff extraction failed')
 
-            if delete_ome:
-                pass
+                if delete_ome:
+                    os.remove(ome_tiff_filename(filename, series, channel_number, z))
     return series_list
 
 
