@@ -181,7 +181,7 @@ def split_tiff(imagefile, ometiff_file, series=None, z=None, channel=None, compr
                                             stderr=result.stderr)
 
 
-def seadragon_tiffs(image_path, z_planes=None, dump_metadata=True, overwrite=True, delete_ome=False):
+def seadragon_tiffs(image_path, z_planes=None, dump_metadata=True, overwrite=True, delete_ome=True):
     """
 
     :param image_path: Input image file in any format recognized by bioformats
