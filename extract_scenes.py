@@ -241,6 +241,9 @@ def seadragon_tiffs(image_path, z_planes=None, dump_metadata=True, overwrite=Tru
 
                 if delete_ome:
                     os.remove(ome_tiff_filename(filename, series, channel_number, z))
+
+    with open(filename + '.json', 'w') as f:
+        f.write(json.dumps(series_list, indent=4))
     return series_list
 
 
