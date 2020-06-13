@@ -126,7 +126,7 @@ def image_file_contents(filename, noflat=True):
         offset = offset + r
 
     images = [i for i in images if i['Name'] != 'label image']
-    return images, metadata
+    return images
 
 
 def ome_tiff_filename(file, series, channel, z):
@@ -181,10 +181,11 @@ def split_tiff(imagefile, ometiff_file, series=None, z=None, channel=None, compr
                                             stderr=result.stderr)
 
 
-def seadragon_tiffs(image_path, z_planes=None, dump_metadata=True, overwrite=True, delete_ome=True):
+def seadragon_tiffs(image_path, series_metadata=None, z_planes=None, dump_metadata=True, overwrite=True, delete_ome=True):
     """
 
     :param image_path: Input image file in any format recognized by bioformats
+    :param series_metadata: JSON representation of OME metadata from file in image_path. If None, this is generated.
     :param z_planes: Which z_plane to select.  If None, output complete Z-stack, if 'middle' output representitive plane.
     :param overwrite:
     :param delete_ome: Remove the intermediate OME-TIFF files
@@ -200,10 +201,11 @@ def seadragon_tiffs(image_path, z_planes=None, dump_metadata=True, overwrite=Tru
 
     filename = filename + '/' + filename
 
-    series_list, _ = image_file_contents(image_path)
+    if not series_metadata:
+        series_metadata = image_file_contents(image_path)
 
     # Create a non-ome tiff pyramid version of the file optimized for open sea dragon.
-    for series in series_list:
+    for series in series_metadata:
         # Pick the slice in the middle, if there is a Z stack and z_plane is  'middle'
         z_plane = int(math.ceil(series['SizeZ'] / 2) - 1) if z_planes == 'middle' else z_planes
         split_tiff(image_path, filename, series=series,
@@ -244,11 +246,11 @@ def seadragon_tiffs(image_path, z_planes=None, dump_metadata=True, overwrite=Tru
 
     with open(filename + '.json', 'w') as f:
         f.write(json.dumps(series_list, indent=4))
-    return series_list
+    return series_metadata
 
 
-def main(imagefile, overwrite=False):
-    seadragon_tiffs(imagefile, overwrite=overwrite)
+def main(imagefile):
+    seadragon_tiffs(imagefile)
 
 
 if __name__ == '__main__':
