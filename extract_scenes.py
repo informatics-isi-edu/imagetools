@@ -22,12 +22,14 @@ magick_cmd = '/usr/local/bin/magick'
 identify_cmd = '/usr/local/bin/identify'
 bf_env = dict(os.environ, **{'BF_MAX_MEM': '16g'})
 
+
 def image_file_contents(filename, noflat=True):
     """
     Figure out the structure of the image file including the number of images in the file (.e.g. series) and the
     names of the channels in the file.
 
     :param filename:
+    :param noflat:
     :return:
     """
 
@@ -75,9 +77,14 @@ def image_file_contents(filename, noflat=True):
 
     metadata = ET.fromstring(result.stdout[result.stdout.find('<OME'):])
     images = []
-    print(len(metadata.findall('ome:Image', ns)))
+
     for c, e in enumerate(metadata.findall('ome:Image', ns)):
         i = {'Number': c,  'Name': e.attrib['Name'], 'ID': e.attrib['ID']}
+
+        # Add in attributes to indicate the position of the Scene in a CZI file.
+        stage = e.find('./ome:StageLabel', ns)
+        if stage is not None:
+            i.update(** {k: map_value(v) for k, v in stage.attrib.items() if k != 'ID'})
 
         # Add in attributes of Pixels element, but don't include Pixel element ID..
         pixels = e.find('./ome:Pixels', ns)
@@ -85,7 +92,7 @@ def image_file_contents(filename, noflat=True):
 
         # Now add in the details about the channels
         i['Channels'] = [{k: map_value(v) for k, v in c.attrib.items()}
-                          for c in pixels.findall('./ome:Channel', ns)]
+                         for c in pixels.findall('./ome:Channel', ns)]
         images.append(i)
 
     logger.info('Number of series is {}'.format(len(images)))
@@ -99,7 +106,6 @@ def image_file_contents(filename, noflat=True):
         if i.startswith('Series #'):
             logger.debug(i)
             resolution = 1
-            thumbnail_series = False
             parsing_series = True
             continue
         if 'Resolutions' in i and parsing_series:
@@ -131,11 +137,16 @@ def image_file_contents(filename, noflat=True):
 
 def ome_tiff_filename(file, series, channel, z):
     return '{}-Series_{}-C{}-Z{}.ome.tif'.format(file,
-                                        series['Number'] if series is not None else "%s",
-                                        channel if channel is not None else (
-                                            0 if series['SizeC'] == 1 else '%c'),
-                                        z if z is not None else (
-                                            0 if series['SizeZ'] == 1 else '%z'))
+                                                 series['Number'] if series is not None else "%s",
+                                                 channel if channel is not None else (
+                                                     0 if series['SizeC'] == 1 else '%c'),
+                                                 z if z is not None else (
+                                                     0 if series['SizeZ'] == 1 else '%z'))
+
+
+def is_tiff(filename):
+    # True if filename ends in tif or tiff and not .ome.tiff or .ome.tif
+    return re.search('(?<!\.ome)\.tiff?$', filename)
 
 
 def split_tiff(imagefile, ometiff_file, series=None, z=None, channel=None, compress=True, overwrite=False):
@@ -181,7 +192,23 @@ def split_tiff(imagefile, ometiff_file, series=None, z=None, channel=None, compr
                                             stderr=result.stderr)
 
 
-def seadragon_tiffs(image_path, series_metadata=None, z_planes=None, dump_metadata=True, overwrite=True, delete_ome=True):
+def generate_iiif_tiff(infile, outfile, series_number=0, channel_name='Brightfield', z=0, tile_size=512):
+    print('iiif_tiff', infile, outfile)
+    vips_convert = [
+        vips_cmd, 'tiffsave', infile,
+        '{}-Series_{}-{}-Z_{}.tif'.format(outfile, series_number, channel_name, z),
+        '--tile', '--pyramid', '--compression', 'jpeg',
+        '--tile-width', str(tile_size), '--tile-height', str(tile_size)
+    ]
+    logger.info('Generating IIIF Tiff file: ' + outfile)
+    result = subprocess.run(vips_convert, check=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+    logger.info(result.stdout)
+    if result.returncode != 0:
+        logger.info('IIIF Tiff generation failed: ' + infile)
+
+
+def seadragon_tiffs(image_path, series_metadata=None, z_planes=None, overwrite=True, delete_ome=True):
     """
 
     :param image_path: Input image file in any format recognized by bioformats
@@ -205,44 +232,39 @@ def seadragon_tiffs(image_path, series_metadata=None, z_planes=None, dump_metada
         series_metadata = image_file_contents(image_path)
 
     # Create a non-ome tiff pyramid version of the file optimized for open sea dragon.
-    for series in series_metadata:
-        # Pick the slice in the middle, if there is a Z stack and z_plane is  'middle'
-        z_plane = int(math.ceil(series['SizeZ'] / 2) - 1) if z_planes == 'middle' else z_planes
-        split_tiff(image_path, filename, series=series,
-                   z=z_plane,
-                   overwrite=overwrite)
+    if is_tiff(image_path):
+        if len(series_metadata) != 1:
+            logger.info('Multi-page raw tiff file: ' + filename)
+        generate_iiif_tiff(image_path, filename)
+    else:
+        for series in series_metadata:
+            # Pick the slice in the middle, if there is a Z stack and z_plane is  'middle'
+            z_plane = int(math.ceil(series['SizeZ'] / 2) - 1) if z_planes == 'middle' else z_planes
+            split_tiff(image_path, filename, series=series,
+                       z=z_plane,
+                       overwrite=overwrite)
 
-        if dump_metadata:
             with open('{}_s{}.json'.format(filename, series['Number']), 'w') as f:
                 f.write(json.dumps(series, indent=4))
 
+            # Now convert this single image to a pyramid with 512x512 jpeg compressed tiles, which is going to be
+            # good for openseadragon.  Need to itereate over each channel and z-plane. Note that the number of
+            # "effective" channels may be different then the value of SizeC.
+            for channel_number, channel in enumerate(series['Channels']):
+                # Get the channel name out of the info we have for the channel, use the ID if there is no name.
+                channel_name = channel.get('Name', channel['ID'])
+                channel_name = channel_name.replace(" ", "_")
+                logger.info('Converting scene {} {} {} to compressed TIFF'.format(series['Number'],
+                                                                                  channel_name,
+                                                                                  z_plane))
 
-        # Now convert this single image to a pyramid with 256x256 jpeg compressed tiles, which is going to be
-        # good for openseadragon.  Need to itereate over each channel and z-plane. Note that the number of "effective"
-        # channels may be different then the value of SizeC.
-        for channel_number, channel in enumerate(series['Channels']):
-            # Get the channel name out of the info we have for the channel, use the ID if there is no name.
-            channel_name = channel.get('Name', channel['ID'])
-            channel_name = channel_name.replace(" ", "_")
-            logger.info('Converting scene {} {} {} to compressed TIFF'.format(series['Number'], channel_name, z_plane))
+                for z in range(series['SizeZ']) if z_plane is None else [z_plane]:
+                    generate_iiif_tiff(
+                        ome_tiff_filename(filename, series, channel_number, z),
+                        filename, series['Number'], channel_name, z)
 
-            for z in range(series['SizeZ']) if z_plane is None else [z_plane]:
-                vips_convert = [
-                    vips_cmd, 'tiffsave',
-                    ome_tiff_filename(filename, series, channel_number, z),
-                    '{}-Series_{}-{}-Z_{}.tif'.format(filename, series['Number'], channel_name, z),
-                    '--tile', '--pyramid', '--compression', 'jpeg',
-                    '--tile-width', '512', '--tile-height', '512'
-                ]
-
-                result = subprocess.run(vips_convert, check=True,
-                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
-                logger.info(result.stdout)
-                if result.returncode != 0:
-                    logger.info('Tiff extraction failed')
-
-                if delete_ome:
-                    os.remove(ome_tiff_filename(filename, series, channel_number, z))
+                    if delete_ome:
+                        os.remove(ome_tiff_filename(filename, series, channel_number, z))
 
     with open(filename + '.json', 'w') as f:
         f.write(json.dumps(series_metadata, indent=4))
@@ -255,4 +277,3 @@ def main(imagefile):
 
 if __name__ == '__main__':
     sys.exit(main(sys.argv[1]))
-
