@@ -4,18 +4,27 @@ import re
 import sys
 import math
 import json
+import tempfile
+import time
+import io
 
 import subprocess
 import logging
 
-logging.basicConfig(level=logging.DEBUG)
+from PIL import Image, ImageCms
+
+Image.MAX_IMAGE_PIXELS = None
 
 logger = logging.getLogger(__name__)
+FORMAT = "[%(filename)s:%(lineno)s - %(funcName)20s() ] %(message)s"
+logging.basicConfig(format=FORMAT)
 logger.setLevel(logging.INFO)
 
 BFCONVERT_CMD = '/usr/local/bin/bftools/bfconvert'
 SHOWINF_CMD = '/usr/local/bin/bftools/showinf'
 VIPS_CMD = '/usr/local/bin/vips'
+BIOFORMATS2RAW_CMD = '/usr/local/bin/bioformats2raw'
+RAW2OMETIFF_CMD = '/usr/local/bin/raw2ometiff'
 
 # Make sure we have enough memory to run bfconvert on big files
 BF_ENV = dict(os.environ, **{'BF_MAX_MEM': '24g'})
@@ -54,7 +63,7 @@ def image_file_contents(filename, noflat=True):
                 return x
 
     logger.info("Getting file metadata....")
-    showinf_args = ['-nopix', '-omexml'] + (['-noflat'] if noflat else [])
+    showinf_args = ['-nopix', '-omexml', '-cache'] + (['-noflat'] if noflat else [])
 
     result = subprocess.run([SHOWINF_CMD] + showinf_args + [filename],
                             universal_newlines=True, check=True, capture_output=True,
@@ -107,7 +116,6 @@ def image_file_contents(filename, noflat=True):
             s = re.search('= (.+)', i)
             images[series]['Thumbnail series'] = map_value(s.group(1))
         if i == '' and parsing_series:
-            logger.debug(i)
             series += 1
             parsing_series = False
         if '<OME' in i:
@@ -143,15 +151,46 @@ def ome_tiff_filename(file, series, channel, z):
 
 def is_tiff(filename):
     # True if filename ends in tif or tiff and not .ome.tiff or .ome.tif
-    return re.search('(?<!\.ome)\.tiff?$', filename)
+    return True if re.search('(?<!\.ome)\.tiff?$', filename) else False
 
 
-def bfconvert(infile, outfile, args, compression='LZW', overwrite=False, autoscale=False):
-    bfconvert_args = ['-overwrite' if overwrite else '-nooverwrite']
+def is_ome_tiff(filename):
+    return True if filename.endswith('.ome.tif') or filename.endswith('.ome.tiff') else False
+
+
+def is_photoshop_grayscale(filename):
+    """
+    Identify if source file is a Photoshop TIFF file with an adobe specific ICC profile.
+    :param filename:
+    :return:
+    """
+    img = Image.open(filename)
+    icc_profile = img.info.get('icc_profile', None)
+    if is_tiff(filename) and icc_profile is not None:
+        profile = ImageCms.ImageCmsProfile(io.BytesIO(icc_profile)).profile
+        return profile.profile_description.startswith('Dot Gain') and profile.xcolor_space == 'GRAY'
+    else:
+        return False
+
+
+def bfconvert(infile, outfile, args,
+              series=None, z=None, channel=None,
+              compression='LZW', overwrite=False, autoscale=False):
+    logger.info('bfconvert: {} -> {}'.format(infile, outfile))
+    start_time = time.time()
+    bfconvert_args = ['-cache', '-tilex', '1024', '-tiley', '1024']
+    if overwrite:
+        bfconvert_args.append('-overwrite')
     if compression:
         bfconvert_args.extend(['-compression', compression])
     if autoscale:
         bfconvert_args.append('-autoscale')
+    if series is not None:
+        bfconvert_args.extend(['-series', str(series)])
+    if z is not None:
+        bfconvert_args.extend(['-z', str(z)])
+    if channel is not None:
+        bfconvert_args.extend(['-channel', str(channel)])
 
     bfconvert_args.extend(args)
     result = subprocess.run([BFCONVERT_CMD] + bfconvert_args + [infile, outfile],
@@ -159,12 +198,30 @@ def bfconvert(infile, outfile, args, compression='LZW', overwrite=False, autosca
     if result.stdout:
         logger.info(result.stdout)
 
+    logger.info('bfconvert {}->{} execution time: {}'.format(infile, outfile, time.time() - start_time))
+
+
+def generate_ome_tiff(infile, outfile):
+    start_time = time.time()
+    filename, ext = os.path.splitext(os.path.basename(infile))
+
+    logger.info('{} -> {}'.format(infile, outfile))
+    with tempfile.TemporaryDirectory() as tmpdirname:
+        n5_file = tmpdirname + filename + '_n5'
+        logger.info('converting to n5 format')
+        subprocess.run([BIOFORMATS2RAW_CMD, '--resolutions=1'] + [infile, n5_file],
+                       env=BF_ENV, check=True, capture_output=True, universal_newlines=True)
+        logger.info('converting to ome-tiff')
+        subprocess.run([RAW2OMETIFF_CMD] + [n5_file, outfile],
+                       env=BF_ENV, check=True, capture_output=True, universal_newlines=True)
+
+    logger.info('execution time: {}'.format(time.time() - start_time))
+
 
 def split_tiff(imagefile, ometiff_file, series=None, z=None, channel=None, compression='LZW', overwrite=False,
                autoscale=False):
     """
-    Split an imagefile into a set of OME Tiff files with a single S/Z/C per file. Also generate S/Z files so that
-    there is a convienent input for annotation.
+    Split an imagefile into a set of OME Tiff files with a single S/Z per file.
 
     :param imagefile: Path of the file which contains the input data. Can be any image formate recognized by bioformats.
     :param ometiff_file: Path to output file.  Needs to be an OME-TIFF file.
@@ -180,43 +237,48 @@ def split_tiff(imagefile, ometiff_file, series=None, z=None, channel=None, compr
     # Create template of output file.  If Z or Channel are none, use the implicit file splitting in bfconvert.
     # If a value for C or Z is not provided and there is only one channel or Z plane, then omit argument, otherwise
     # use the %c or %z to get bfconvert to do the splitting and filenaming.
-    split_ome_tiff = ome_tiff_filename(ometiff_file, series, channel, z)
+    bfconvert_args = []
 
     if series is not None:
         logger.info("Series {} -> {}".format(series['Number'], series['Flattened series']))
-        bfconvert_args = ['-series', str(series['Flattened series'])]
-    else:
-        bfconvert_args = []
-
-    if z is not None and (series['SizeZ'] > 1):
-        bfconvert_args.extend(['-z', str(z)])
 
     # Generate per-series/per-z OME-TIFF
-    series_ome_tiff = '{}-S{}-Z%z.ome.tif'.format(ometiff_file, series['Number'])
-    bfconvert(imagefile, series_ome_tiff, bfconvert_args, autoscale=autoscale, compression=compression)
-
-    # Generate per-channel/per-z OME-TIFF
-    if channel is not None and (series['SizeC'] > 1):
-        bfconvert_args.extend(['-channel', str(channel)])
-    bfconvert(imagefile, split_ome_tiff, bfconvert_args, overwrite=overwrite, compression=compression,
-              autoscale=autoscale)
+    for zplane in range(series['SizeZ']):
+        series_ome_tiff = '{}-S{}-Z{}.ome.tif'.format(ometiff_file, series['Number'], zplane)
+        bfconvert(imagefile, series_ome_tiff, bfconvert_args,
+                  z=zplane, series=series['Flattened series'],
+                  overwrite=overwrite, autoscale=autoscale, compression=compression)
 
 
 def generate_iiif_tiff(infile, outfile, series, channel_name='Brightfield', z=0,
-                       tile_size=512):
+                       tile_size=1024, page=1):
+    """
+    Generate a tiff file that can be used by the IIF server.
+    :param infile:
+    :param outfile:
+    :param series:
+    :param channel_name:
+    :param z:
+    :param tile_size:
+    :param page:
+    :return:
+    """
+    start_time = time.time()
+    tiff_file = '{}-S{}-{}-Z{}.tif'.format(outfile, series['Number'], channel_name, z)
     vips_convert = [
-        VIPS_CMD, 'tiffsave', infile,
-        '{}-S{}-{}-Z_{}.tif'.format(outfile, series['Number'], channel_name, z),
-        '--tile', '--compression', 'jpeg',
-        '--tile-width', str(tile_size), '--tile-height', str(tile_size), '--pyramid'
+        VIPS_CMD, 'tiffsave', '{}[page={}]'.format(infile, page),
+        tiff_file,
+        '--compression=jpeg',
+        '--pyramid', '--tile', '--tile-width={}'.format(tile_size), '--tile-height={}'.format(tile_size)
     ]
 
-    logger.info('Generating iiif_tiff {} -> {}'.format(infile, outfile))
-    try:
-        result = subprocess.run(vips_convert, check=True, capture_output=True, universal_newlines=True)
+    logger.info('Generating iiif_tiff {} -> {}'.format(infile, tiff_file))
+    result = subprocess.run(vips_convert, check=True, capture_output=True, universal_newlines=True)
+    if result.stdout:
         logger.info(result.stdout)
-    except:
-        pass
+
+    logger.info('generate_iiif_tiff execution time: {}'.format(time.time() - start_time))
+
 
 def seadragon_tiffs(image_path, series_metadata=None, z_planes=None, overwrite=True, delete_ome=True, autoscale=False):
     """
@@ -240,6 +302,11 @@ def seadragon_tiffs(image_path, series_metadata=None, z_planes=None, overwrite=T
 
     filename = filename + '/' + filename
 
+    # get rid of old cache file if one is around
+    try:
+        os.remove('.{}.bfmemo'.format(image_path))
+    except FileNotFoundError:
+        pass
     if not series_metadata:
         series_metadata = image_file_contents(image_path)
 
@@ -249,10 +316,12 @@ def seadragon_tiffs(image_path, series_metadata=None, z_planes=None, overwrite=T
             logger.info('Multi-page raw tiff file: ' + filename)
         generate_iiif_tiff(image_path, filename, series_metadata[0])
     else:
+        ome_tiff_file = filename + '.ome.tif'
+        generate_ome_tiff(image_path, ome_tiff_file)
         for series in series_metadata:
             # Pick the slice in the middle, if there is a Z stack and z_plane is  'middle'
             z_plane = int(math.ceil(series['SizeZ'] / 2) - 1) if z_planes == 'middle' else z_planes
-            split_tiff(image_path, filename, series=series,
+            split_tiff(ome_tiff_file, filename, series=series,
                        z=z_plane,
                        overwrite=overwrite, autoscale=autoscale)
 
@@ -262,30 +331,38 @@ def seadragon_tiffs(image_path, series_metadata=None, z_planes=None, overwrite=T
             # Now convert this single image to a pyramid with 512x512 jpeg compressed tiles, which is going to be
             # good for openseadragon.  Need to itereate over each channel and z-plane. Note that the number of
             # "effective" channels may be different then the value of SizeC.
-            for channel_number, channel in enumerate(series['Channels']):
-                # Get the channel name out of the info we have for the channel, use the ID if there is no name.
-                channel_name = channel.get('Name', channel['ID'])
-                channel_name = channel_name.replace(" ", "_")
-                logger.info('Converting scene {} {} {} to compressed TIFF'.format(series['Number'],
-                                                                                  channel_name,
-                                                                                  z_plane))
+            for z in range(series['SizeZ']) if z_plane is None else [z_plane]:
+                for channel_number, channel in enumerate(series['Channels']):
+                    # Get the channel name out of the info we have for the channel, use the ID if there is no name.
+                    channel_name = channel.get('Name', channel['ID'])
+                    channel_name = channel_name.replace(" ", "_")
+                    logger.info('Converting scene {} {} {} to compressed TIFF'.format(series['Number'],
+                                                                                      channel_name,
+                                                                                      z_plane))
 
-                for z in range(series['SizeZ']) if z_plane is None else [z_plane]:
                     generate_iiif_tiff(
-                        ome_tiff_filename(filename, series, channel_number, z),
-                        filename, series, channel_name, z,
+                        '{}-S{}-Z{}.ome.tif'.format(filename, series['Number'], z),
+                        filename, series, channel_name, z, page=channel_number
                     )
 
-                    if delete_ome:
-                        os.remove(ome_tiff_filename(filename, series, channel_number, z))
+        # if delete_ome:
+        #     os.remove(ome_tiff_filename(filename, series, channel_number, z))
 
     with open(filename + '.json', 'w') as f:
         f.write(json.dumps(series_metadata, indent=4))
     return series_metadata
 
 
-def main(imagefile):
-    seadragon_tiffs(imagefile)
+def main(imagefile, overwrite=False):
+    try:
+        start_time = time.time()
+        seadragon_tiffs(imagefile, overwrite=overwrite)
+        print("--- %s seconds ---" % (time.time() - start_time))
+        return 0
+    except subprocess.CalledProcessError as r:
+        print(r.cmd)
+        print(r.stderr)
+        return 1
 
 
 if __name__ == '__main__':
