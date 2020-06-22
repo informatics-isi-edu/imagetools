@@ -1,1 +1,8 @@
 These are python scripts and other tools for prepping various image format files for access via the cantalop IIIF image serrver and seadragon
+
+These tools depend on three external programs:
+
+bioformats
+visp
+bioformats2raw (https://github.com/glencoesoftware/bioformats2raw)
+raw2ometiff (https://github.com/glencoesoftware/raw2ometiff)
