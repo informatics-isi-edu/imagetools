@@ -129,24 +129,7 @@ def image_file_contents(filename, noflat=True):
         offset = offset + i['Resolutions']
 
     images = [i for i in images if not i['Thumbnail series']]
-    return images
-
-
-def ome_tiff_filename(file, series, channel, z):
-    """
-    Generate the name for an output OME-TIFF File
-    :param file: Input file name
-    :param series: A dictionary with series metadata. If not provided, assume that all series will be generated
-    :param channel: A specific channel number to output. If not provided, generate all channels
-    :param z: A specific z plane number. If not provided, generate all Z.
-    :return: OME tiff filename with apprporate wildcards (%s, %c, %z)
-    """
-    return '{}-S{}-C{}-Z{}.ome.tif'.format(file,
-                                           series['Number'] if series is not None else "%s",
-                                           channel if channel is not None else (
-                                               0 if series['SizeC'] == 1 else '%c'),
-                                           z if z is not None else (
-                                               0 if series['SizeZ'] == 1 else '%z'))
+    return images, metadata
 
 
 def is_tiff(filename):
@@ -173,9 +156,22 @@ def is_photoshop_grayscale(filename):
         return False
 
 
-def bfconvert(infile, outfile, args,
+def bfconvert(infile, outfile, args=None,
               series=None, z=None, channel=None,
               compression='LZW', overwrite=False, autoscale=False):
+    """
+    Run the bioformats file converter command.
+    :param infile:
+    :param outfile:
+    :param args: Additional arguements to command
+    :param series: Series number to extract
+    :param z: Z channel number to extract
+    :param channel: Channel number to extract
+    :param compression:
+    :param overwrite:
+    :param autoscale:
+    :return:
+    """
     logger.info('bfconvert: {} -> {}'.format(infile, outfile))
     start_time = time.time()
     bfconvert_args = ['-cache', '-tilex', '1024', '-tiley', '1024']
@@ -192,7 +188,8 @@ def bfconvert(infile, outfile, args,
     if channel is not None:
         bfconvert_args.extend(['-channel', str(channel)])
 
-    bfconvert_args.extend(args)
+    if args:
+        bfconvert_args.extend(args)
     result = subprocess.run([BFCONVERT_CMD] + bfconvert_args + [infile, outfile],
                             env=BF_ENV, check=True, capture_output=True, universal_newlines=True)
     if result.stdout:
@@ -202,6 +199,13 @@ def bfconvert(infile, outfile, args,
 
 
 def generate_ome_tiff(infile, outfile):
+    """
+    Use bioformats2raw and raw2ometiff to generate an OME tiff version of infile.  To make things simple downstream,
+    only include one level of pyramid in this file.
+    :param infile:
+    :param outfile:
+    :return:
+    """
     start_time = time.time()
     filename, ext = os.path.splitext(os.path.basename(infile))
 
@@ -218,34 +222,29 @@ def generate_ome_tiff(infile, outfile):
     logger.info('execution time: {}'.format(time.time() - start_time))
 
 
-def split_tiff(imagefile, ometiff_file, series=None, z=None, channel=None, compression='LZW', overwrite=False,
-               autoscale=False):
+def split_tiff_by_z(imagefile, ometiff_file, series, z=None, compression='LZW', overwrite=False,
+                    autoscale=False):
     """
-    Split an imagefile into a set of OME Tiff files with a single S/Z per file.
+    Split an imagefile into a set of OME Tiff files with a single S/Z per file.  Each file will have a single resolution
+    but potentially multiple channels.
 
     :param imagefile: Path of the file which contains the input data. Can be any image formate recognized by bioformats.
     :param ometiff_file: Path to output file.  Needs to be an OME-TIFF file.
-    :param series: Series number to extract from converted OME-TIF file. If None, extract all series.
-    :param z: Z plane to extract. If None extract all Z planes.
-    :param channel:
+    :param series: Series metadata to extract from converted OME-TIF file. If None, extract all series.
+    :param z: z plane to extract, if None, extract all.
     :param compression:
     :param overwrite: Overwrite existing OME-TIFF files
     :param autoscale: Pass autoscale argument to bfconvert used to generate final tiff file.
     :return:
     """
 
-    # Create template of output file.  If Z or Channel are none, use the implicit file splitting in bfconvert.
-    # If a value for C or Z is not provided and there is only one channel or Z plane, then omit argument, otherwise
-    # use the %c or %z to get bfconvert to do the splitting and filenaming.
-    bfconvert_args = []
-
-    if series is not None:
-        logger.info("Series {} -> {}".format(series['Number'], series['Flattened series']))
+    logger.info("Series {} -> {}".format(series['Number'], series['Flattened series']))
 
     # Generate per-series/per-z OME-TIFF
-    for zplane in range(series['SizeZ']):
+    zplanes = range(series['SizeZ']) if z is None else [z]
+    for zplane in zplanes:
         series_ome_tiff = '{}-S{}-Z{}.ome.tif'.format(ometiff_file, series['Number'], zplane)
-        bfconvert(imagefile, series_ome_tiff, bfconvert_args,
+        bfconvert(imagefile, series_ome_tiff,
                   z=zplane, series=series['Flattened series'],
                   overwrite=overwrite, autoscale=autoscale, compression=compression)
 
@@ -307,8 +306,10 @@ def seadragon_tiffs(image_path, series_metadata=None, z_planes=None, overwrite=T
         os.remove('.{}.bfmemo'.format(image_path))
     except FileNotFoundError:
         pass
+
+    # Get metadata for input image file.
     if not series_metadata:
-        series_metadata = image_file_contents(image_path)
+        series_metadata,_ = image_file_contents(image_path)
 
     # Create a non-ome tiff pyramid version of the file optimized for open sea dragon.
     if is_tiff(image_path):
@@ -317,18 +318,25 @@ def seadragon_tiffs(image_path, series_metadata=None, z_planes=None, overwrite=T
         generate_iiif_tiff(image_path, filename, series_metadata[0])
     else:
         ome_tiff_file = filename + '.ome.tif'
-        generate_ome_tiff(image_path, ome_tiff_file)
+
+        # Get OME-TIFF version of inputfile
+        if is_ome_tiff(image_path):
+            ome_tiff_file = image_path
+        else:
+            generate_ome_tiff(image_path, ome_tiff_file)
+
+        # Now go through series.....
         for series in series_metadata:
             # Pick the slice in the middle, if there is a Z stack and z_plane is  'middle'
             z_plane = int(math.ceil(series['SizeZ'] / 2) - 1) if z_planes == 'middle' else z_planes
-            split_tiff(ome_tiff_file, filename, series=series,
-                       z=z_plane,
-                       overwrite=overwrite, autoscale=autoscale)
+            split_tiff_by_z(ome_tiff_file, filename, series=series,
+                            z=z_plane,
+                            overwrite=overwrite, autoscale=autoscale)
 
             with open('{}_S{}.json'.format(filename, series['Number']), 'w') as f:
                 f.write(json.dumps(series, indent=4))
 
-            # Now convert this single image to a pyramid with 512x512 jpeg compressed tiles, which is going to be
+            # Now convert this single image to a pyramid with jpeg compressed tiles, which is going to be
             # good for openseadragon.  Need to itereate over each channel and z-plane. Note that the number of
             # "effective" channels may be different then the value of SizeC.
             for z in range(series['SizeZ']) if z_plane is None else [z_plane]:
@@ -339,10 +347,10 @@ def seadragon_tiffs(image_path, series_metadata=None, z_planes=None, overwrite=T
                     logger.info('Converting scene {} {} {} to compressed TIFF'.format(series['Number'],
                                                                                       channel_name,
                                                                                       z_plane))
-
+                    # Generate a iiif file for the page that corrisponds to this channel.
                     generate_iiif_tiff(
                         '{}-S{}-Z{}.ome.tif'.format(filename, series['Number'], z),
-                        filename, series, channel_name, z, page=channel_number
+                        filename, series, channel_name=channel_name, z=z, page=channel_number
                     )
 
         # if delete_ome:
