@@ -29,6 +29,9 @@ RAW2OMETIFF_CMD = '/usr/local/bin/raw2ometiff'
 # Make sure we have enough memory to run bfconvert on big files
 BF_ENV = dict(os.environ, **{'BF_MAX_MEM': '24g'})
 
+def clear_bioformats_cache(image):
+    pass
+
 
 def image_file_contents(filename, noflat=True):
     """
@@ -250,7 +253,7 @@ def split_tiff_by_z(imagefile, ometiff_file, series, z=None, compression='LZW', 
 
 
 def generate_iiif_tiff(infile, outfile, series, channel_name='Brightfield', z=0,
-                       tile_size=1024, page=1):
+                       tile_size=1024, page=0):
     """
     Generate a tiff file that can be used by the IIF server.
     :param infile:
@@ -307,24 +310,25 @@ def seadragon_tiffs(image_path, series_metadata=None, z_planes=None, overwrite=T
     except FileNotFoundError:
         pass
 
+    # If file is in a different format, generate ome-tiff.
+    # Get OME-TIFF version of inputfile
+    ome_tiff_file = filename + '.ome.tif'
+    if is_ome_tiff(image_path) or is_tiff(image_path):
+        ome_tiff_file = image_path
+    else:
+        generate_ome_tiff(image_path, ome_tiff_file)
+
     # Get metadata for input image file.
     if not series_metadata:
-        series_metadata,_ = image_file_contents(image_path)
+        series_metadata,_ = image_file_contents(ome_tiff_file)
 
     # Create a non-ome tiff pyramid version of the file optimized for open sea dragon.
     if is_tiff(image_path):
         if len(series_metadata) != 1:
             logger.info('Multi-page raw tiff file: ' + filename)
+
         generate_iiif_tiff(image_path, filename, series_metadata[0])
     else:
-        ome_tiff_file = filename + '.ome.tif'
-
-        # Get OME-TIFF version of inputfile
-        if is_ome_tiff(image_path):
-            ome_tiff_file = image_path
-        else:
-            generate_ome_tiff(image_path, ome_tiff_file)
-
         # Now go through series.....
         for series in series_metadata:
             # Pick the slice in the middle, if there is a Z stack and z_plane is  'middle'
