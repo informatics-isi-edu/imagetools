@@ -214,13 +214,15 @@ def generate_ome_tiff(infile, outfile):
 
     logger.info('{} -> {}'.format(infile, outfile))
     with tempfile.TemporaryDirectory() as tmpdirname:
-        n5_file = tmpdirname + filename + '_n5'
+        n5_file = '{}/{}_n5'.format(tmpdirname,filename)
         logger.info('converting to n5 format')
         subprocess.run([BIOFORMATS2RAW_CMD, '--resolutions=1'] + [infile, n5_file],
                        env=BF_ENV, check=True, capture_output=True, universal_newlines=True)
         logger.info('converting to ome-tiff')
         subprocess.run([RAW2OMETIFF_CMD] + [n5_file, outfile],
                        env=BF_ENV, check=True, capture_output=True, universal_newlines=True)
+
+
 
     logger.info('execution time: {}'.format(time.time() - start_time))
 
