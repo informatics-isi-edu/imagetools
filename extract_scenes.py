@@ -11,6 +11,7 @@ import io
 import subprocess
 import logging
 
+from tifffile import imread, imwrite, TiffFile, TiffWriter
 from PIL import Image, ImageCms
 
 Image.MAX_IMAGE_PIXELS = None
@@ -28,6 +29,7 @@ RAW2OMETIFF_CMD = '/usr/local/bin/raw2ometiff'
 
 # Make sure we have enough memory to run bfconvert on big files
 BF_ENV = dict(os.environ, **{'BF_MAX_MEM': '24g'})
+
 
 def clear_bioformats_cache(image):
     pass
@@ -47,8 +49,13 @@ def image_file_contents(filename, noflat=True):
     # each image stack, and not seperated out one per resolution.  omexml argument is needed as this forces additional
     # information such as the series name to be put into the text information.
 
-    def map_value(x):
-        if x == 'true':
+    def map_value(i):
+        s = re.search('= (.+)', i)
+        if s:
+            x = s.group(1)
+        else:
+            x = i
+        if 'true' in x:
             return True
         elif x == 'false':
             return False
@@ -112,12 +119,11 @@ def image_file_contents(filename, noflat=True):
             parsing_series = True
             continue
         if 'Resolutions' in i and parsing_series:
-            logger.debug(i)
-            s = re.search('= (.+)', i)
-            images[series]['Resolutions'] = map_value(s.group(1))
+            images[series]['Resolutions'] = map_value(i)
         if 'Thumbnail series' in i and parsing_series:
-            s = re.search('= (.+)', i)
-            images[series]['Thumbnail series'] = map_value(s.group(1))
+            images[series]['Thumbnail series'] = map_value(i)
+        if 'RGB' in i and parsing_series:
+            images[series]['RGB'] = map_value(i)
         if i == '' and parsing_series:
             series += 1
             parsing_series = False
@@ -126,10 +132,13 @@ def image_file_contents(filename, noflat=True):
             break
 
     # Calculate what the corrisponding series number would be if the noflat option was not used.
+    # Also set Thumbnail series based on image name.
     offset = 0
     for i in images:
         i['Flattened series'] = offset
         offset = offset + i['Resolutions']
+        if i['Name'] == 'label image' or i['Name'] == 'macro image':
+            i['Thumbnail series'] = True
 
     images = [i for i in images if not i['Thumbnail series']]
     return images, metadata
@@ -214,15 +223,13 @@ def generate_ome_tiff(infile, outfile):
 
     logger.info('{} -> {}'.format(infile, outfile))
     with tempfile.TemporaryDirectory() as tmpdirname:
-        n5_file = '{}/{}_n5'.format(tmpdirname,filename)
+        n5_file = '{}/{}_n5'.format(tmpdirname, filename)
         logger.info('converting to n5 format')
         subprocess.run([BIOFORMATS2RAW_CMD, '--resolutions=1'] + [infile, n5_file],
                        env=BF_ENV, check=True, capture_output=True, universal_newlines=True)
         logger.info('converting to ome-tiff')
-        subprocess.run([RAW2OMETIFF_CMD] + [n5_file, outfile],
+        subprocess.run([RAW2OMETIFF_CMD, '--rgb'] + [n5_file, outfile],
                        env=BF_ENV, check=True, capture_output=True, universal_newlines=True)
-
-
 
     logger.info('execution time: {}'.format(time.time() - start_time))
 
@@ -254,6 +261,17 @@ def split_tiff_by_z(imagefile, ometiff_file, series, z=None, compression='LZW', 
                   overwrite=overwrite, autoscale=autoscale, compression=compression)
 
 
+def interleave_tiff(infile, outfile, page):
+    with TiffFile(infile) as tiff_in:
+        page = tiff_in.pages[page]
+        with TiffWriter(outfile) as tiff_out:
+            logger.info('interleaving RBG')
+            if page.tags['PhotometricInterpretation'].value.name == 'RGB':
+                tiff_out.save(page.asarray(), photometric='rgb')
+            else:
+                tiff_out.save(page.asarray())
+
+
 def generate_iiif_tiff(infile, outfile, series, channel_name='Brightfield', z=0,
                        tile_size=1024, page=0):
     """
@@ -268,18 +286,32 @@ def generate_iiif_tiff(infile, outfile, series, channel_name='Brightfield', z=0,
     :return:
     """
     start_time = time.time()
+    page_file = '{}-S{}-P{}.tif'.format(outfile, series['Number'], page)
     tiff_file = '{}-S{}-{}-Z{}.tif'.format(outfile, series['Number'], channel_name, z)
+
+    if series['RGB']:
+        # If we are looking at an RGB series, we need to make sure that the channel is interleaved, or else vips will
+        # choke.
+        interleave_tiff(infile, page_file, page)
+    else:
+        page_file = '{}-S{}-Z{}.ome.tif[page={}]'.format(infile, series['Number'], z, page)
+
+    # Convert page out of OME-TIFF to a standard TIFF pyramid.
     vips_convert = [
-        VIPS_CMD, 'tiffsave', '{}[page={}]'.format(infile, page),
+        VIPS_CMD, 'tiffsave',
+        page_file,
         tiff_file,
         '--compression=jpeg',
-        '--pyramid', '--tile', '--tile-width={}'.format(tile_size), '--tile-height={}'.format(tile_size)
+        '--pyramid', '--tile'
     ]
 
     logger.info('Generating iiif_tiff {} -> {}'.format(infile, tiff_file))
     result = subprocess.run(vips_convert, check=True, capture_output=True, universal_newlines=True)
     if result.stdout:
         logger.info(result.stdout)
+
+    if page_file.endswith('-P{}.tif'.format(page)):
+        os.remove(page_file)
 
     logger.info('generate_iiif_tiff execution time: {}'.format(time.time() - start_time))
 
@@ -322,7 +354,7 @@ def seadragon_tiffs(image_path, series_metadata=None, z_planes=None, overwrite=T
 
     # Get metadata for input image file.
     if not series_metadata:
-        series_metadata,_ = image_file_contents(ome_tiff_file)
+        series_metadata, _ = image_file_contents(ome_tiff_file)
 
     # Create a non-ome tiff pyramid version of the file optimized for open sea dragon.
     if is_tiff(image_path):
@@ -367,10 +399,10 @@ def seadragon_tiffs(image_path, series_metadata=None, z_planes=None, overwrite=T
     return series_metadata
 
 
-def main(imagefile, overwrite=False):
+def main(imagefile, overwrite=False, autoscale=False):
     try:
         start_time = time.time()
-        seadragon_tiffs(imagefile, overwrite=overwrite)
+        seadragon_tiffs(imagefile, overwrite=overwrite, autoscale=autoscale)
         print("--- %s seconds ---" % (time.time() - start_time))
         return 0
     except subprocess.CalledProcessError as r:
