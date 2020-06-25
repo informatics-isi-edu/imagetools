@@ -11,10 +11,7 @@ import io
 import subprocess
 import logging
 
-from tifffile import imread, imwrite, TiffFile, TiffWriter
-from PIL import Image, ImageCms
-
-Image.MAX_IMAGE_PIXELS = None
+from tifffile import TiffFile, TiffWriter
 
 logger = logging.getLogger(__name__)
 FORMAT = "[%(filename)s:%(lineno)s - %(funcName)20s() ] %(message)s"
