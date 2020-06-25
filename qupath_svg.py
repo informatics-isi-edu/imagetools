@@ -23,12 +23,17 @@ def catagory_map(file):
         map = {}
         for i in pathclasses:
             rgb_value = convert_rgb(i.get('color', 0))
-            # Since we are using colors to identify catalogies, they have to be unique.
+            # Since we are using colors to identify catagories, they have to be unique.
             if rgb_value in map:
                 raise ValueError('Duplicate color value')
 
             # Fix issue with qupath putting extra space after colon.
-            map[rgb_value] = i['name'].replace(': ', ':')
+            m = re.search('\((.*)\)$', i['name'])
+            if m:
+                cv_term = m.group(1)
+            else:
+                cv_term = i['name']
+            map[rgb_value] = cv_term
         return map
 
 def svg(file, map):
@@ -46,7 +51,7 @@ def svg(file, map):
         # Pull out the RGB value from the style attribute.
         style = child.attrib['style']
         m = re.search('stroke:.*rgb\((\d+),(\d+),(\d+)\)', style)
-        rgb = (int(m.group(1)),int(m.group(2)), int(m.group(3)))
+        rgb = (int(m.group(3)), int(m.group(2)), int(m.group(1)))
 
         # Add ID based on catagory associated with the RGB value.
         child.set('id', map[rgb])
