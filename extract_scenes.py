@@ -13,6 +13,8 @@ import logging
 
 from tifffile import TiffFile, TiffWriter
 
+TMPDIR=None
+
 logger = logging.getLogger(__name__)
 FORMAT = "[%(filename)s:%(lineno)s - %(funcName)20s() ] %(message)s"
 logging.basicConfig(format=FORMAT)
@@ -83,7 +85,11 @@ def image_file_contents(filename, noflat=True):
     ns = {'ome': 'http://www.openmicroscopy.org/Schemas/OME/2016-06',
           'xsi': "http://www.w3.org/2001/XMLSchema-instance"}
 
-    metadata = ET.fromstring(result.stdout[result.stdout.find('<OME'):])
+    metadata = ET.ElementTree(ET.fromstring(result.stdout[result.stdout.find('<OME'):]))
+
+    for k,v in ns.items():
+        ET.register_namespace(k, v)
+
     images = []
 
     for c, e in enumerate(metadata.findall('ome:Image', ns)):
@@ -219,7 +225,7 @@ def generate_ome_tiff(infile, outfile):
     filename, ext = os.path.splitext(os.path.basename(infile))
 
     logger.info('{} -> {}'.format(infile, outfile))
-    with tempfile.TemporaryDirectory() as tmpdirname:
+    with tempfile.TemporaryDirectory(dir=TMPDIR) as tmpdirname:
         n5_file = '{}/{}_n5'.format(tmpdirname, filename)
         logger.info('converting to n5 format')
         subprocess.run([BIOFORMATS2RAW_CMD, '--resolutions=1'] + [infile, n5_file],
@@ -351,7 +357,7 @@ def seadragon_tiffs(image_path, series_metadata=None, z_planes=None, overwrite=T
 
     # Get metadata for input image file.
     if not series_metadata:
-        series_metadata, _ = image_file_contents(ome_tiff_file)
+        series_metadata, ome_metadata = image_file_contents(ome_tiff_file)
 
     # Create a non-ome tiff pyramid version of the file optimized for open sea dragon.
     if is_tiff(image_path):
@@ -393,6 +399,14 @@ def seadragon_tiffs(image_path, series_metadata=None, z_planes=None, overwrite=T
 
     with open(filename + '.json', 'w') as f:
         f.write(json.dumps(series_metadata, indent=4))
+
+    ome_metadata.write(filename + '.xml')
+
+    # Clean up metadata removing internal keys
+    for i in series_metadata:
+        del i['Flattened series']
+        del i['Resolutions']
+
     return series_metadata
 
 
