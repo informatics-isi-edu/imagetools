@@ -27,17 +27,14 @@ def catagory_map(file):
             if rgb_value in map:
                 raise ValueError('Duplicate color value')
 
-            # Fix issue with qupath putting extra space after colon.
-            m = re.search('\((.*)\)$', i['name'])
-            if m:
-                cv_term = m.group(1)
-            else:
-                cv_term = i['name']
-            map[rgb_value] = cv_term
+            # Pick apart name in form of anatomy name (id_prefix_id_suffix)
+            m = re.fullmatch('(?P<term>.+?) *(\((?P<prefix>.+)_(?P<suffix>.+)\))?', i['name'])
+            print(i['name'], m.groupdict())
+            map[rgb_value] = m.groupdict()
         return map
 
 def svg(file, map):
-    ET.register_namespace('', 'http://www.w3.org/2000/svg')
+    ET.register_namespace('svg', 'http://www.w3.org/2000/svg')
     ET.register_namespace('xlink', "http://www.w3.org/1999/xlink")
     ET.register_namespace('jfreesvg',"http://www.jfree.org/jfreesvg/svg")
 
@@ -53,11 +50,14 @@ def svg(file, map):
         m = re.search('stroke:.*rgb\((\d+),(\d+),(\d+)\)', style)
         rgb = (int(m.group(3)), int(m.group(2)), int(m.group(1)))
 
+        if map[rgb]['term'] == 'Image Boundary':
+            continue
+
         # Add ID based on catagory associated with the RGB value.
-        child.set('id', map[rgb])
+        child.set('id', '{}:{},{}'.format(map[rgb]['prefix'], map[rgb]['suffix'], map[rgb]['term']))
 
         # Create a list of paths, grouped by catagory name.
-        paths[map[rgb]] = paths.get(map[rgb],[]) + [child]
+        paths[map[rgb]['term']] = paths.get(map[rgb]['term'],[]) + [child]
 
     for k, v in paths.items():
         # For each catagory name, generate a seperate file with the SVG code for the paths for that catalogy.
@@ -65,5 +65,5 @@ def svg(file, map):
         newroot.extend(v)
         annotation = ET.ElementTree(element=newroot)
         print('writing file', k + '.svg', v)
-        annotation.write(k + '.svg' )
+        annotation.write(k.replace(' ', '_') + '.svg' )
     return
