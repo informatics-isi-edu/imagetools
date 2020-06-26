@@ -1,5 +1,7 @@
 import json
 import re
+import sys
+import os
 import xml.etree.ElementTree as ET
 
 def convert_rgb(number):
@@ -29,12 +31,11 @@ def catagory_map(file):
 
             # Pick apart name in form of anatomy name (id_prefix_id_suffix)
             m = re.fullmatch('(?P<term>.+?) *(\((?P<prefix>.+)_(?P<suffix>.+)\))?', i['name'])
-            print(i['name'], m.groupdict())
             map[rgb_value] = m.groupdict()
         return map
 
 def svg(file, map):
-    ET.register_namespace('svg', 'http://www.w3.org/2000/svg')
+    ET.register_namespace('', 'http://www.w3.org/2000/svg')
     ET.register_namespace('xlink', "http://www.w3.org/1999/xlink")
     ET.register_namespace('jfreesvg',"http://www.jfree.org/jfreesvg/svg")
 
@@ -44,7 +45,6 @@ def svg(file, map):
     for child in svg:
         if 'defs' in child.tag:
             continue
-
         # Pull out the RGB value from the style attribute.
         style = child.attrib['style']
         m = re.search('stroke:.*rgb\((\d+),(\d+),(\d+)\)', style)
@@ -53,17 +53,37 @@ def svg(file, map):
         if map[rgb]['term'] == 'Image Boundary':
             continue
 
+        if child.tag != '{http://www.w3.org/2000/svg}g':
+            print('Skipping non-group tag: ', child.tag)
+            continue
+
         # Add ID based on catagory associated with the RGB value.
         child.set('id', '{}:{},{}'.format(map[rgb]['prefix'], map[rgb]['suffix'], map[rgb]['term']))
 
         # Create a list of paths, grouped by catagory name.
         paths[map[rgb]['term']] = paths.get(map[rgb]['term'],[]) + [child]
 
+    declaration = '<?xml version = "1.0"?>\n'
+    doctype = \
+        '<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.0//EN" "http://www.w3.org/TR/2001/REC-SVG-20010904/DTD/svg10.dtd">\n'
+
     for k, v in paths.items():
         # For each catagory name, generate a seperate file with the SVG code for the paths for that catalogy.
         newroot = ET.Element(svg.tag, attrib=svg.attrib)
         newroot.extend(v)
         annotation = ET.ElementTree(element=newroot)
-        print('writing file', k + '.svg', v)
-        annotation.write(k.replace(' ', '_') + '.svg' )
+
+        filename, ext = os.path.splitext(os.path.basename(file))
+        outfile = '{}_{}.svg'.format(filename, k.replace(' ', '_'))
+        print('writing file', outfile)
+        with open(outfile, 'w') as f:
+            f.write(declaration)
+            f.write(doctype)
+            annotation.write(f, encoding='unicode')
     return
+
+def main(file, classes='classes.json'):
+    svg(file,catagory_map(classes))
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1]))
