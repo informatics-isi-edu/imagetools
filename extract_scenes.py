@@ -11,7 +11,7 @@ import io
 import subprocess
 import logging
 
-from tifffile import TiffFile, TiffWriter
+from tifffile import TiffFile, TiffWriter, TiffSequence
 
 TMPDIR=None
 
@@ -71,7 +71,13 @@ def image_file_contents(filename, noflat=True):
             except ValueError:
                 return x
 
-    logger.info("Getting file metadata....")
+    # get rid of old cache file if one is around
+    try:
+        os.remove('.{}.bfmemo'.format(filename))
+    except FileNotFoundError:
+        pass
+
+    logger.info("Getting {} metadata....".format(filename))
     showinf_args = ['-nopix', '-omexml', '-cache'] + (['-noflat'] if noflat else [])
 
     result = subprocess.run([SHOWINF_CMD] + showinf_args + [filename],
@@ -156,24 +162,10 @@ def is_ome_tiff(filename):
     return True if filename.endswith('.ome.tif') or filename.endswith('.ome.tiff') else False
 
 
-def is_photoshop_grayscale(filename):
-    """
-    Identify if source file is a Photoshop TIFF file with an adobe specific ICC profile.
-    :param filename:
-    :return:
-    """
-    img = Image.open(filename)
-    icc_profile = img.info.get('icc_profile', None)
-    if is_tiff(filename) and icc_profile is not None:
-        profile = ImageCms.ImageCmsProfile(io.BytesIO(icc_profile)).profile
-        return profile.profile_description.startswith('Dot Gain') and profile.xcolor_space == 'GRAY'
-    else:
-        return False
-
-
 def bfconvert(infile, outfile, args=None,
               series=None, z=None, channel=None,
-              compression='LZW', overwrite=False, autoscale=False):
+              compression='LZW', overwrite=False, autoscale=False,
+              pyramid=None):
     """
     Run the bioformats file converter command.
     :param infile:
@@ -202,6 +194,8 @@ def bfconvert(infile, outfile, args=None,
         bfconvert_args.extend(['-z', str(z)])
     if channel is not None:
         bfconvert_args.extend(['-channel', str(channel)])
+    if pyramid is not None:
+        bfconvert_args.extend(['-pyramid-resolutions', str(pyramid)])
 
     if args:
         bfconvert_args.extend(args)
@@ -267,12 +261,28 @@ def split_tiff_by_z(imagefile, ometiff_file, series, z=None, compression='LZW', 
 def interleave_tiff(infile, outfile, page):
     with TiffFile(infile) as tiff_in:
         page = tiff_in.pages[page]
-        with TiffWriter(outfile) as tiff_out:
+        with TiffWriter(outfile, bigtiff=True) as tiff_out:
             logger.info('interleaving RBG')
             if page.tags['PhotometricInterpretation'].value.name == 'RGB':
                 tiff_out.save(page.asarray(), photometric='rgb')
             else:
                 tiff_out.save(page.asarray())
+
+
+def merge_channels(infiles, outfile, ome_metadata):
+    description_tag = [
+        ("ImageDescription", 'b', 0, ET.tostring(ome_metadata.getroot()), False)]
+
+    images = []
+    #ts = TiffSequence(infiles)
+    for i in infiles:
+        with TiffFile(i) as t:
+            images.append(t.pages[0])
+    with TiffWriter(outfile) as tiff_out:
+        for i in images:
+            tiff_out.save(i.asarray(), compress=('JPEG', 5), extratags=description_tag)
+            print('tags', tiff_out._)
+
 
 
 def generate_iiif_tiff(infile, outfile, series, channel_name='Brightfield', z=0,
