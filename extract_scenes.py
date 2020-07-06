@@ -393,7 +393,9 @@ def merge_channels(infile, series, zplane, ome_metadata):
             images.append(t.pages[0])
     with TiffWriter(outfile) as tiff_out:
         for i in images:
-            tiff_out.save(i.asarray(), compress=('JPEG', 10), tile=(1024, 1024))
+            tiff_out.save(i.asarray(),
+                          compress=('JPEG', 10),
+                          tile=(1024, 1024))
 
     tiffcomment(outfile, z_metadata(ome_metadata, series, zplane))
 
@@ -428,7 +430,7 @@ def generate_iiif_tiff(ometiff_file, series, z=0, tile_size=1024, channel_number
         VIPS_CMD, 'tiffsave',
         page_file,
         outfile,
-        '--compression=jpeg' '-Q=100',
+        '--compression=jpeg', '--Q=100',
         '--pyramid', '--tile'
     ]
 
