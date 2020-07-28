@@ -267,7 +267,7 @@ def split_tiff_by_z(imagefile, ometiff_file, series, z=None, compression='LZW', 
 def interleave_tiff(infile, outfile, page):
     with TiffFile(infile) as tiff_in:
         page = tiff_in.pages[page]
-        with TiffWriter(outfile) as tiff_out:
+        with TiffWriter(outfile, bigtiff=True) as tiff_out:
             logger.info('interleaving RBG')
             if page.tags['PhotometricInterpretation'].value.name == 'RGB':
                 tiff_out.save(page.asarray(), photometric='rgb')
@@ -305,6 +305,7 @@ def generate_iiif_tiff(infile, outfile, series, channel_name='Brightfield', z=0,
         page_file,
         tiff_file,
         '--compression=jpeg',
+        '--bigtiff',
         '--pyramid', '--tile'
     ]
 
