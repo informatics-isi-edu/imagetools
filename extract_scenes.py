@@ -6,13 +6,10 @@ import math
 import json
 import tempfile
 import time
-import io
-
 import subprocess
 import logging
 
-from tifffile import TiffFile, TiffWriter, imwrite, imread
-from PIL import Image
+from tifffile import TiffFile, TiffWriter
 
 TMPDIR = None
 
@@ -303,6 +300,7 @@ def interleave_rgb(ome_file, outfile):
         page_offset += pixel_channels * pixel_z  # Skip over to start of next series.
     set_omexml(outfile, metadata)
 
+
 def generate_ome_tiff(infile, outfile):
     """
     Use bioformats2raw and raw2ometiff to generate an OME tiff version of infile.  To make things simple downstream,
@@ -320,17 +318,17 @@ def generate_ome_tiff(infile, outfile):
         ome_file = '{}/{}.ome.tif'.format(tmpdirname, filename)
         logger.info('converting to n5 format')
         subprocess.run([BIOFORMATS2RAW_CMD,
-                        '--resolutions=1',
                         '--tile_height=4096', '--tile_width=4096'] +
                        [infile, n5_file],
                        env=BF_ENV, check=True, capture_output=True, universal_newlines=True)
         logger.info('converting to ome-tiff')
         subprocess.run([RAW2OMETIFF_CMD,
                         '--rgb',
-                        '--compression=LZW'] + [n5_file, ome_file],
+                        '--compression=LZW'] + [n5_file, outfile],
+                       # [n5_file, ome_file],
                        env=BF_ENV, check=True, capture_output=True, universal_newlines=True)
 
-        interleave_rgb(ome_file, outfile)
+        #interleave_rgb(ome_file, outfile)
     logger.info('execution time: {}'.format(time.time() - start_time))
 
 
@@ -361,38 +359,39 @@ def split_tiff_by_z(imagefile, ometiff_file, series, z=None, compression='LZW', 
                   overwrite=overwrite, autoscale=autoscale, compression=compression)
 
 
-def generate_iiif_tiff(ometiff_file, series, z=0, tile_size=1024, channel_number=0, compression='jpeg'):
-    """
-    Generate a tiff file that can be used by the IIF server.
-    :param ometiff_file:
-    :param series:
-    :param z:
-    :param tile_size:
-    :param channel_number:
-    :return:
-    """
+def generate_iiif_tiff(series, outfile,
+                       z=0, channel_number=0,
+                       tile_size=1024,
+                       resolutions=5, compression=6):
     start_time = time.time()
-    filename = ometiff_file.replace('.ome.tif', '')
-    outfile = IIIF_FILE.format(file=filename, s=series['Number'], z=z, c=channel_number)
 
-    plane = series['Flattened planes'] + series['Planes'].index((z, channel_number))
+    # Calculate which image in the series corresponds to Z and Channel.
+    is_rgb = series[0].photometric.name == 'RBG'
+    z_cnt = series.shape[series.axes.index('Z')] if 'Z' in series.axes else 1
+    channel_cnt = series.shape[series.axes.index('Z')] if 'C' in series.axes else 1
+
+    if len(series.axes) == 4 and not (series.axes[0:2] == 'ZC' or series.axes[0:2] == 'CZ'):
+        raise OMETiffConversionError('Tiff file with wrong number of axes: {}.'.format(series.axes))
+
+    z_first = True if (series.axes[0] == 'Z') else False
+
+    plane = (z_cnt*z + channel_number) if z_first else (channel_cnt*channel_number + z)
     logger.info('generating iiif tiff z:{} C:{} -> plane {}'.format(z, channel_number, plane))
+    is_rgb = series[0].photometric.name == 'RBG'
 
-    # Convert page out of OME-TIFF to a standard TIFF pyramid.
-    vips_convert = [
-                       VIPS_CMD, 'tiffsave',
-                       f'{ometiff_file}[page={plane}]',
-                       outfile,
-                       '--bigtiff',
-                       '--tile', '--tile-width=1024', '--tile-height=1024',
-                       '--pyramid'
-                   ] + (['--compression=lzw'] if compression.lower() == 'lzw' else ['--compression=jpeg', '--Q=90'])
+    with TiffWriter(outfile, bigtiff=True) as tiff_out:
+        page = series[plane]
+        options = dict(tile=(tile_size, tile_size), compress=compression, metadata=None)
+        image = page.asarray()
+        if is_rgb:
+            logger.info('interleaving RBG....')
+            assert('SXY' == page.axes[0])
+            image = image.transpose(1, 2 ,0 )   # Interleaved image has to have S as last dimension.
+            options.update({'photometric':'RGB', 'planarconfig':'CONTIG'})
 
-    logger.info('Generating iiif_tiff {} -> {}'.format(ometiff_file, outfile))
-    result = subprocess.run(vips_convert, check=True, capture_output=True, universal_newlines=True)
-    if result.stdout:
-        logger.info(result.stdout)
-
+        tiff_out.save(image, **options)
+        for i in range(1, resolutions):
+            tiff_out.save(image[::i * 2, ::i * 2], subfiletype=1, **options)
     logger.info('generate_iiif_tiff execution time: {}'.format(time.time() - start_time))
 
 
@@ -440,25 +439,27 @@ def seadragon_tiffs(image_path, series_metadata=None, z_planes=None, overwrite=T
         generate_iiif_tiff(image_path, IIIF_FILE.format(file=filename, s=0, z=0, c=0), series_metadata[0])
     else:
         # Now go through series.....
-        for series in series_metadata:
-            # Pick the slice in the middle, if there is a Z stack and z_plane is  'middle'
-            z_plane = int(math.ceil(series['SizeZ'] / 2) - 1) if z_planes == 'middle' else z_planes
+        with TiffFile(ome_tiff_file) as ome_tiff:
+            for series in series_metadata:
+                # Pick the slice in the middle, if there is a Z stack and z_plane is  'middle'
+                z_plane = int(math.ceil(series['SizeZ'] / 2) - 1) if z_planes == 'middle' else z_planes
 
-            # Now convert this single image to a pyramid with jpeg compressed tiles, which is going to be
-            # good for openseadragon.  Need to iterate over each channel and z-plane. Note that the number of
-            # "effective" channels may be different then the value of SizeC.
-            for z in range(series['SizeZ']) if z_plane is None else [z_plane]:
-                for channel_number, channel in enumerate(series['Channels']):
-                    # Get the channel name out of the info we have for the channel, use the ID if there is no name.
-                    channel_name = channel.get('Name', channel['ID'])
-                    channel_name = channel_name.replace(" ", "_")
-                    logger.info('Converting scene {} {} {} to compressed TIFF'.format(series['Number'],
-                                                                                      channel_name,
-                                                                                      z_plane))
-                    # Generate a iiif file for the page that corrisponds to this channel.
-                    generate_iiif_tiff('{}.ome.tif'.format(filename), series, z=z, channel_number=channel_number)
-            if split_z:
-                split_tiff_by_z(filename, series, z, ome_metadata, compression=compression)
+                # Now convert this single image to a pyramid with jpeg compressed tiles, which is going to be
+                # good for openseadragon.  Need to iterate over each channel and z-plane. Note that the number of
+                # "effective" channels may be different then the value of SizeC.
+                for z in range(series['SizeZ']) if z_plane is None else [z_plane]:
+                    for channel_number, channel in enumerate(series['Channels']):
+                        # Get the channel name out of the info we have for the channel, use the ID if there is no name.
+                        channel_name = channel.get('Name', channel['ID'])
+                        channel_name = channel_name.replace(" ", "_")
+                        logger.info('Converting scene {} {} {} to compressed TIFF'.format(series['Number'],
+                                                                                          channel_name,
+                                                                                          z_plane))
+                        # Generate a iiif file for the page that corresponds to this channel.
+                        generate_iiif_tiff(ome_tiff.series[series['Number']],
+                            IIIF_FILE.format(file=filename, s=series['Number'], z=z, c=channel_number))
+                if split_z:
+                    split_tiff_by_z(filename, series, z, ome_metadata, compression=compression)
         if delete_ome:
             os.remove(ome_tiff_file)
 
