@@ -9,6 +9,7 @@ import time
 import subprocess
 import logging
 
+import skimage
 from tifffile import TiffFile, TiffWriter
 
 TMPDIR = None
@@ -315,9 +316,9 @@ def generate_ome_tiff(infile, outfile):
     logger.info('{} -> {}'.format(infile, outfile))
     with tempfile.TemporaryDirectory(dir=TMPDIR) as tmpdirname:
         n5_file = '{}/{}_n5'.format(tmpdirname, filename)
-        ome_file = '{}/{}.ome.tif'.format(tmpdirname, filename)
         logger.info('converting to n5 format')
         subprocess.run([BIOFORMATS2RAW_CMD,
+                        '--resolutions=1',
                         '--tile_height=4096', '--tile_width=4096'] +
                        [infile, n5_file],
                        env=BF_ENV, check=True, capture_output=True, universal_newlines=True)
@@ -325,10 +326,7 @@ def generate_ome_tiff(infile, outfile):
         subprocess.run([RAW2OMETIFF_CMD,
                         '--rgb',
                         '--compression=LZW'] + [n5_file, outfile],
-                       # [n5_file, ome_file],
                        env=BF_ENV, check=True, capture_output=True, universal_newlines=True)
-
-        #interleave_rgb(ome_file, outfile)
     logger.info('execution time: {}'.format(time.time() - start_time))
 
 
@@ -359,35 +357,38 @@ def split_tiff_by_z(imagefile, ometiff_file, series, z=None, compression='LZW', 
                   overwrite=overwrite, autoscale=autoscale, compression=compression)
 
 
-def generate_iiif_tiff(series, outfile,
+def generate_iiif_tiff(series, series_metadata, filename,
                        z=0, channel_number=0,
                        tile_size=1024,
-                       resolutions=5, compression=6):
+                       resolutions=5, compression='ZSTD'):
     start_time = time.time()
 
+    outfile = IIIF_FILE.format(file=filename, s=series_metadata['Number'], z=z, c=channel_number)
     # Calculate which image in the series corresponds to Z and Channel.
-    is_rgb = series[0].photometric.name == 'RBG'
-    z_cnt = series.shape[series.axes.index('Z')] if 'Z' in series.axes else 1
-    channel_cnt = series.shape[series.axes.index('Z')] if 'C' in series.axes else 1
+    plane = series_metadata['Planes'].index((z, channel_number))
 
     if len(series.axes) == 4 and not (series.axes[0:2] == 'ZC' or series.axes[0:2] == 'CZ'):
         raise OMETiffConversionError('Tiff file with wrong number of axes: {}.'.format(series.axes))
 
-    z_first = True if (series.axes[0] == 'Z') else False
-
-    plane = (z_cnt*z + channel_number) if z_first else (channel_cnt*channel_number + z)
     logger.info('generating iiif tiff z:{} C:{} -> plane {}'.format(z, channel_number, plane))
-    is_rgb = series[0].photometric.name == 'RBG'
-
     with TiffWriter(outfile, bigtiff=True) as tiff_out:
-        page = series[plane]
-        options = dict(tile=(tile_size, tile_size), compress=compression, metadata=None)
-        image = page.asarray()
-        if is_rgb:
-            logger.info('interleaving RBG....')
-            assert('SXY' == page.axes[0])
-            image = image.transpose(1, 2 ,0 )   # Interleaved image has to have S as last dimension.
+        # Compute resolution (pixels/cm) from physical size per pixel and units.
+        resolution = (
+            1 / (series_metadata['PhysicalSizeX'] / (10000 if series_metadata['PhysicalSizeXUnit'] == 'µm' else 1)),
+            1 / (series_metadata['PhysicalSizeY'] / (10000 if series_metadata['PhysicalSizeYUnit'] == 'µm' else 1)),
+            'CENTIMETER'
+        )
+        options = dict(tile=(tile_size, tile_size), compress=compression,
+                       resolution=resolution,
+                       metadata=None)
+        image = series[plane].asarray()
+        if series[0].photometric.name == 'RGB' and series[0].planarconfig.name == 'SEPARATE':
+            logger.info('interleaving RGB....')
+            assert(len(series[plane].axes) == 3)
+            image = image.transpose(1, 2, 0)   # Interleaved image has to have S as last dimension.
             options.update({'photometric':'RGB', 'planarconfig':'CONTIG'})
+        elif (not series_metadata['RGB']) and compression == 'jpeg' and series_metadata['Type'] == 'uint16':
+            image = skimage.util.img_as_ubyte(image)
 
         tiff_out.save(image, **options)
         for i in range(1, resolutions):
@@ -395,7 +396,7 @@ def generate_iiif_tiff(series, outfile,
     logger.info('generate_iiif_tiff execution time: {}'.format(time.time() - start_time))
 
 
-def seadragon_tiffs(image_path, series_metadata=None, z_planes=None, overwrite=True, split_z=False, delete_ome=False, autoscale=False):
+def seadragon_tiffs(image_path, series_metadata=None, z_planes=None, split_z=False, delete_ome=False, compression='ZSTD'):
     """
 
     :param image_path: Input image file in any format recognized by bioformats
@@ -436,7 +437,8 @@ def seadragon_tiffs(image_path, series_metadata=None, z_planes=None, overwrite=T
     if is_tiff(image_path):
         if len(series_metadata) != 1:
             logger.info('Multi-page raw tiff file: ' + filename)
-        generate_iiif_tiff(image_path, IIIF_FILE.format(file=filename, s=0, z=0, c=0), series_metadata[0])
+        generate_iiif_tiff(image_path, IIIF_FILE.format(file=filename, s=0, z=0, c=0), series_metadata[0],
+                           compression=compression)
     else:
         # Now go through series.....
         with TiffFile(ome_tiff_file) as ome_tiff:
@@ -454,10 +456,11 @@ def seadragon_tiffs(image_path, series_metadata=None, z_planes=None, overwrite=T
                         channel_name = channel_name.replace(" ", "_")
                         logger.info('Converting scene {} {} {} to compressed TIFF'.format(series['Number'],
                                                                                           channel_name,
-                                                                                          z_plane))
+                                                                                          z))
                         # Generate a iiif file for the page that corresponds to this channel.
-                        generate_iiif_tiff(ome_tiff.series[series['Number']],
-                            IIIF_FILE.format(file=filename, s=series['Number'], z=z, c=channel_number))
+                        generate_iiif_tiff(ome_tiff.series[series['Number']], series, filename,
+                                           z=z, channel_number=channel_number,
+                                           compression=compression)
                 if split_z:
                     split_tiff_by_z(filename, series, z, ome_metadata, compression=compression)
         if delete_ome:
@@ -476,10 +479,10 @@ def seadragon_tiffs(image_path, series_metadata=None, z_planes=None, overwrite=T
     return series_metadata
 
 
-def main(imagefile, overwrite=False, autoscale=False):
+def main(imagefile, compression='jpeg'):
     try:
         start_time = time.time()
-        seadragon_tiffs(imagefile, overwrite=overwrite, autoscale=autoscale)
+        seadragon_tiffs(imagefile, compression=compression)
         print("--- %s seconds ---" % (time.time() - start_time))
         return 0
     except subprocess.CalledProcessError as r:
