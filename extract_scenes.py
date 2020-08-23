@@ -39,6 +39,133 @@ class OMETiffConversionError(Exception):
     def __init__(self, msg):
         self.msg = msg
 
+class OMETiff():
+    def __init__(self, filename):
+        def map_value(i):
+            s = re.search('= (.+)', i)
+            if s:
+                x = s.group(1)
+            else:
+                x = i
+            if 'true' in x:
+                return True
+            elif 'false' in x:
+                return False
+            m = re.search('([0-9]+) x ([0-9]+)', x)
+            if m:
+                return int(m.group(1)), int(m.group(2))
+            if 'effectively 1' in x:
+                return 1
+            try:
+                return int(x)
+            except ValueError:
+                try:
+                    return float(x)
+                except ValueError:
+                    return x
+
+        self.filename = filename
+        logger.info("Getting {} metadata....".format(filename))
+
+        # Go through the XML and collect up information about channels for each image.
+        # Now get the OME-XML version.
+        ns = {'ome': 'http://www.openmicroscopy.org/Schemas/OME/2016-06',
+              'xsi': "http://www.w3.org/2001/XMLSchema-instance"}
+
+        self.omexml = ET.ElementTree(omexml(filename))
+
+        for k, v in ns.items():
+            ET.register_namespace(k, v)
+
+        self.series_metadata = []
+
+        for c, e in enumerate(self.omexml.findall('ome:Image', ns)):
+            # Add in attributes to indicate the position of the Scene in a CZI file.
+            i = {'Number': c, 'Name': e.attrib['Name'], 'ID': e.attrib['ID']}
+
+            # Add information from stage label so we can determine physical position of series on the slide.
+            stage = e.find('./ome:StageLabel', ns)
+            if stage is not None:
+                i.update(**{k: map_value(v) for k, v in stage.attrib.items() if k != 'ID'})
+
+            # Add in attributes of Pixels element, but don't include Pixel element ID..
+            pixels = e.find('./ome:Pixels', ns)
+            i.update(**{k: map_value(v) for k, v in pixels.attrib.items() if k != 'ID'})
+
+            # Now add in the details about the channels
+            i['Channels'] = [{k: map_value(v) for k, v in c.attrib.items()}
+                             for c in pixels.findall('./ome:Channel', ns)]
+
+            # Look in planes element to determine mapping of Z and C to planes in the series.
+            i['Planes'] = [(int(p.attrib['TheZ']), int(p.attrib['TheC'])) for p in pixels.findall('./ome:Plane', ns)]
+            self.series_metadata.append(i)
+
+        logger.info('Number of series is {}'.format(len(self.series_metadata)))
+
+        with TiffFile(filename) as tf:
+            if len(self.series_metadata) != len(tf.series):
+                raise OMETiffConversionError("TIFF image count doesn't match OME metatada")
+            for i, s in zip(self.series_metadata, tf.series):
+                i['Resolutions'] = len(s.levels)
+                i['RGB'] = s.pages[0].photometric.name == 'RGB'
+                for c in i['Channels']:
+                    c['RGB'] = i['RGB']  # Add RGB attribute to each channel.
+                i['Interleaved'] = s.pages[0].planarconfig.name == 'CONTIG'
+                i['Thumbnail series'] = True if (i['Name'] == 'label image' or i['Name'] == 'macro image') else False
+
+            # Compute ordinial position of image planes in the tiff file, taking into account multiple series and
+            # multiple resolutions assuming that the noflat option was not used.
+            # Also set Thumbnail series based on image name.
+            series_offset = 0
+            plane_offset = 0
+            for i in self.series_metadata:
+                i['Flattened series'] = series_offset
+                i['Flattened planes'] = plane_offset
+                series_offset += i['Resolutions']
+                plane_offset += len(i['Planes'])
+
+            self.series_metadata = [i for i in self.series_metadata if not i['Thumbnail series']]
+
+    def dump(self, filename):
+        # Clean up metadata removing internal keys
+        with open(filename + '.json', 'w') as f:
+            f.write(json.dumps(
+                [
+                    {k: v for k, v in s.items() if (k != 'Flattened series' or k != 'Resolutions')}
+                    for s in self.series_metadata
+                ],
+                indent=4))
+
+        self.omexml.write(filename + '.xml')
+
+    @staticmethod
+    def generate_ome_tiff(infile, outfile):
+        """
+        Use bioformats2raw and raw2ometiff to generate an OME tiff version of infile.  To make things simple downstream,
+        only include one level of pyramid in this file.
+        :param infile:
+        :param outfile:
+        :return:
+        """
+        start_time = time.time()
+        filename, _ext = os.path.splitext(os.path.basename(infile))
+
+        logger.info('{} -> {}'.format(infile, outfile))
+        with tempfile.TemporaryDirectory(dir=TMPDIR) as tmpdirname:
+            n5_file = '{}/{}_n5'.format(tmpdirname, filename)
+            logger.info('converting to n5 format')
+            subprocess.run([BIOFORMATS2RAW_CMD,
+                            '--resolutions=1',
+                            '--tile_height=4096', '--tile_width=4096'] +
+                           [infile, n5_file],
+                           env=BF_ENV, check=True, capture_output=True, universal_newlines=True)
+            logger.info('converting to ome-tiff')
+            subprocess.run([RAW2OMETIFF_CMD,
+                            '--rgb',
+                            '--compression=LZW'] + [n5_file, outfile],
+                           env=BF_ENV, check=True, capture_output=True, universal_newlines=True)
+        logger.info('execution time: {}'.format(time.time() - start_time))
+
 
 def clear_bioformats_cache(image):
     # get rid of old cache file if one is around
@@ -46,137 +173,6 @@ def clear_bioformats_cache(image):
         os.remove('.{}.bfmemo'.format(image))
     except FileNotFoundError:
         pass
-
-
-def image_file_contents(filename, noflat=True):
-    """
-    Figure out the structure of the image file including the number of images in the file (.e.g. series) and the
-    names of the channels in the file.
-
-    :param filename:
-    :param noflat:
-    :return:
-    """
-
-    # Figure out the number of images in the input file. Noflat option is required so that the series are numbered by
-    # each image stack, and not seperated out one per resolution.  omexml argument is needed as this forces additional
-    # information such as the series name to be put into the text information.
-
-    def map_value(i):
-        s = re.search('= (.+)', i)
-        if s:
-            x = s.group(1)
-        else:
-            x = i
-        if 'true' in x:
-            return True
-        elif 'false' in x:
-            return False
-        m = re.search('([0-9]+) x ([0-9]+)', x)
-        if m:
-            return int(m.group(1)), int(m.group(2))
-        if 'effectively 1' in x:
-            return 1
-        try:
-            return int(x)
-        except ValueError:
-            try:
-                return float(x)
-            except ValueError:
-                return x
-
-    clear_bioformats_cache(filename)
-
-    # Figure out the number of images in the input file. Noflat option is required so that the series are numbered by
-    # each image stack, and not seperated out one per resolution.  omexml argument is needed as this forces additional
-    # information such as the series name to be put into the text information.
-
-    logger.info("Getting {} metadata....".format(filename))
-
-    # Go through the XML and collect up information about channels for each image.
-    # Now get the OME-XML version.
-    ns = {'ome': 'http://www.openmicroscopy.org/Schemas/OME/2016-06',
-          'xsi': "http://www.w3.org/2001/XMLSchema-instance"}
-
-    metadata = ET.ElementTree(omexml(filename))
-
-    for k, v in ns.items():
-        ET.register_namespace(k, v)
-
-    images = []
-
-    for c, e in enumerate(metadata.findall('ome:Image', ns)):
-        # Add in attributes to indicate the position of the Scene in a CZI file.
-        i = {'Number': c, 'Name': e.attrib['Name'], 'ID': e.attrib['ID']}
-
-        # Add information from stage label so we can determine physical position of series on the slide.
-        stage = e.find('./ome:StageLabel', ns)
-        if stage is not None:
-            i.update(**{k: map_value(v) for k, v in stage.attrib.items() if k != 'ID'})
-
-        # Add in attributes of Pixels element, but don't include Pixel element ID..
-        pixels = e.find('./ome:Pixels', ns)
-        i.update(**{k: map_value(v) for k, v in pixels.attrib.items() if k != 'ID'})
-
-        # Now add in the details about the channels
-        i['Channels'] = [{k: map_value(v) for k, v in c.attrib.items()}
-                         for c in pixels.findall('./ome:Channel', ns)]
-
-        # Look in planes element to determine mapping of Z and C to planes in the series.
-        i['Planes'] = [(int(p.attrib['TheZ']), int(p.attrib['TheC'])) for p in pixels.findall('./ome:Plane', ns)]
-        images.append(i)
-
-    logger.info('Number of series is {}'.format(len(images)))
-
-    # Now go though the formatted part of the file and pull out information that is not in the OME-XML.
-    showinf_args = ['-nopix', '-cache', '-noflat']
-    result = subprocess.run([SHOWINF_CMD] + showinf_args + [filename],
-                            universal_newlines=True, check=True, capture_output=True,
-                            env=BF_ENV)
-    if result.stderr:
-        logger.info(result.stderr)
-
-    parsing_series = False
-    series = 0
-    for i in result.stdout.splitlines():
-        i = i.lstrip()  # Remove formatting characters.
-        if i.startswith('Series #'):
-            logger.debug(i)
-            images[series]['Resolutions'] = 1
-            parsing_series = True
-            continue
-        if 'Image count' in i and parsing_series and len(images[series]['Planes']) != map_value(i):
-            logger.info('Image planes do not match')
-        if 'Resolutions' in i and parsing_series:
-            images[series]['Resolutions'] = map_value(i)
-        if 'Thumbnail series' in i and parsing_series:
-            images[series]['Thumbnail series'] = map_value(i)
-        if 'RGB' in i and parsing_series:
-            images[series]['RGB'] = map_value(i)
-            for c in images[series]['Channels']:
-                c['RGB'] = images[series]['RGB']  # Add RGB attribute to each channel.
-        if i == '' and parsing_series:
-            series += 1
-            parsing_series = False
-        if 'Reading global metadata' in i:
-            # Stop once you get to the vendor specific annotations
-            break
-
-    # Compute ordinial position of image planes in the tiff file, taking into account multiple series and multiple
-    # resolutions assuming that the noflat option was not used.
-    # Also set Thumbnail series based on image name.
-    series_offset = 0
-    plane_offset = 0
-    for i in images:
-        i['Flattened series'] = series_offset
-        i['Flattened planes'] = plane_offset
-        series_offset += i['Resolutions']
-        plane_offset += len(i['Planes'])
-        if i['Name'] == 'label image' or i['Name'] == 'macro image':
-            i['Thumbnail series'] = True
-
-    images = [i for i in images if not i['Thumbnail series']]
-    return images, metadata
 
 
 def is_tiff(filename):
@@ -254,80 +250,8 @@ def omexml(file):
     :file: OME-TIFF file
     :return: OME-XML value
     """
-    result = subprocess.run(
-        [TIFFCOMMENT_CMD, file], env=BF_ENV, check=True, capture_output=True, universal_newlines=True)
-    if result.stderr:
-        logger.info(result.stderr)
-    return ET.fromstring(result.stdout)
-
-
-def interleave_rgb(ome_file, outfile):
-    ns = {'ome': 'http://www.openmicroscopy.org/Schemas/OME/2016-06',
-          'xsi': "http://www.w3.org/2001/XMLSchema-instance"}
-    for k, v in ns.items():
-        ET.register_namespace(k, v)
-    metadata = ET.ElementTree(omexml(ome_file))
-
-    # VIPS cannot handle non-interleaved RGB, so ensure that all RGB is interleaved
-    with TiffFile(ome_file) as ome_tiff:
-        with TiffWriter(outfile, bigtiff=True) as tiff_out:
-            assert (len(ome_tiff.pages) == len(metadata.findall('.//ome:Plane', ns)))
-            # Keep track of what planes are converted.
-            converted = [False] * len(ome_tiff.pages)
-            for c, page in enumerate(ome_tiff.pages):
-                # Look for RGB planes, not grayscale.
-                if page.tags['PhotometricInterpretation'].value.name == 'RGB':
-                    logger.info('interleaving RBG for {}:{}'.format(ome_file, c))
-                    tiff_out.save(page.asarray().transpose(1, 2, 0),
-                                  planarconfig='CONTIG',
-                                  contiguous=False,
-                                  photometric='RGB')
-                    converted[c] = True
-                else:
-                    tiff_out.save(page.asarray())
-
-    # Now go through the OME-XML and patch up the RGB specification.
-    page_offset = 0
-    for image in metadata.findall('ome:Image', ns):
-        pixels = image.find('./ome:Pixels', ns)
-        pixel_planes = len(pixels.findall('ome:Plane', ns))
-        pixel_channels = int(pixels.attrib['SizeC'])
-        pixel_z = int(pixels.attrib['SizeZ'])
-        if pixel_channels == 3 and pixel_planes == pixel_z:
-            # RGB has three channels reported on single image plane.
-            pixel_channels = 1
-        if converted[page_offset]:
-            pixels.attrib['Interleaved'] = 'true'
-        page_offset += pixel_channels * pixel_z  # Skip over to start of next series.
-    set_omexml(outfile, metadata)
-
-
-def generate_ome_tiff(infile, outfile):
-    """
-    Use bioformats2raw and raw2ometiff to generate an OME tiff version of infile.  To make things simple downstream,
-    only include one level of pyramid in this file.
-    :param infile:
-    :param outfile:
-    :return:
-    """
-    start_time = time.time()
-    filename, _ext = os.path.splitext(os.path.basename(infile))
-
-    logger.info('{} -> {}'.format(infile, outfile))
-    with tempfile.TemporaryDirectory(dir=TMPDIR) as tmpdirname:
-        n5_file = '{}/{}_n5'.format(tmpdirname, filename)
-        logger.info('converting to n5 format')
-        subprocess.run([BIOFORMATS2RAW_CMD,
-                        '--resolutions=1',
-                        '--tile_height=4096', '--tile_width=4096'] +
-                       [infile, n5_file],
-                       env=BF_ENV, check=True, capture_output=True, universal_newlines=True)
-        logger.info('converting to ome-tiff')
-        subprocess.run([RAW2OMETIFF_CMD,
-                        '--rgb',
-                        '--compression=LZW'] + [n5_file, outfile],
-                       env=BF_ENV, check=True, capture_output=True, universal_newlines=True)
-    logger.info('execution time: {}'.format(time.time() - start_time))
+    with TiffFile(file) as tf:
+        return ET.fromstring(tf.ome_metadata)
 
 
 def split_tiff_by_z(imagefile, ometiff_file, series, z=None, compression='LZW', overwrite=False,
@@ -399,11 +323,10 @@ def generate_iiif_tiff(series, series_metadata, filename,
     logger.info('generate_iiif_tiff execution time: {}'.format(time.time() - start_time))
 
 
-def seadragon_tiffs(image_path, series_metadata=None, z_planes=None, split_z=False, delete_ome=False, compression='ZSTD'):
+def seadragon_tiffs(image_path, z_planes=None, split_z=False, delete_ome=False, compression='ZSTD'):
     """
 
     :param image_path: Input image file in any format recognized by bioformats
-    :param series_metadata: JSON representation of OME metadata from file in image_path. If None, this is generated.
     :param z_planes: Which z_plane to select.
                     If None, output complete Z-stack, if 'middle' output representitive plane.
     :param overwrite:
@@ -429,16 +352,15 @@ def seadragon_tiffs(image_path, series_metadata=None, z_planes=None, split_z=Fal
     if is_ome_tiff(image_path):
         ome_tiff_file = image_path
     else:
-        generate_ome_tiff(image_path, ome_tiff_file)
+        OMETiff.generate_ome_tiff(image_path, ome_tiff_file)
 
     # Get metadata for input image file.
-    if not series_metadata:
-        series_metadata, ome_metadata = image_file_contents(ome_tiff_file)
+    ome_contents = OMETiff(ome_tiff_file)
 
     # Create a non-ome tiff pyramid version of the file optimized for open sea dragon.
-        # Now go through series.....
+    # Now go through series.....
     with TiffFile(ome_tiff_file) as ome_tiff:
-        for series in series_metadata:
+        for series in ome_contents.series_metadata:
             # Pick the slice in the middle, if there is a Z stack and z_plane is  'middle'
             z_plane = int(math.ceil(series['SizeZ'] / 2) - 1) if z_planes == 'middle' else z_planes
 
@@ -458,22 +380,13 @@ def seadragon_tiffs(image_path, series_metadata=None, z_planes=None, split_z=Fal
                                        z=z, channel_number=channel_number,
                                        compression=compression)
             if split_z:
-                split_tiff_by_z(filename, series, z, ome_metadata, compression=compression)
+                split_tiff_by_z(filename, series, z, ome_contents.omexml, compression=compression)
 
     if delete_ome:
         os.remove(ome_tiff_file)
 
-    with open(filename + '.json', 'w') as f:
-        f.write(json.dumps(series_metadata, indent=4))
-
-    ome_metadata.write(filename + '.xml')
-
-    # Clean up metadata removing internal keys
-    for i in series_metadata:
-        del i['Flattened series']
-        del i['Resolutions']
-
-    return series_metadata
+    ome_contents.dump(filename)
+    return ome_contents
 
 
 def main(imagefile, compression='jpeg'):
