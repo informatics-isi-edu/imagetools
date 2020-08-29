@@ -485,6 +485,21 @@ def bfconvert(infile, outfile, args=None,
     logger.info('bfconvert {}->{} execution time: {}'.format(infile, outfile, time.time() - start_time))
 
 
+def get_omexml(file):
+    """
+    Set the OME XML field field of a file. This will only work if the tag is already in the file.
+    :param file: File to set the description in.
+    :param omexml: OME-XML tree
+    :return: OME-XML value
+    """
+    result = subprocess.run(
+            [TIFFCOMMENT_CMD, file],
+            env=BF_ENV, check=True, capture_output=True, universal_newlines=True)
+    if result.stderr:
+        logger.info(result.stderr)
+        raise OMETiff.ConversionError(result.stderr)
+    return ET.ElementTree(ET.fromstring(result.stdout))
+
 def set_omexml(file, omexml):
     """
     Set the OME XML field field of a file. This will only work if the tag is already in the file.
