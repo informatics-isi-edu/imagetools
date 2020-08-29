@@ -1,13 +1,16 @@
-import xml.etree.ElementTree as ET
+import copy
+import json
+import logging
+import math
 import os
 import re
 import sys
-import math
-import json
+import subprocess
 import tempfile
 import time
-import subprocess
-import logging
+import uuid
+
+import xml.etree.ElementTree as ET
 
 import skimage
 from tifffile import TiffFile, TiffWriter
@@ -29,49 +32,202 @@ BF_ENV = dict(os.environ, **{'BF_MAX_MEM': '24g'})
 
 
 # Templates for output file names.
-IIIF_FILE = "{file}_S{s}_Z{z}_C{c}.tif"
+IIIF_FILE = "{file}_S{s}_Z{z}_C{c}.ome.tif"
 Z_OME_FILE = "{file}_S{s}_Z{z}.ome.tif"
-
 
 class OMETiff:
     class OMETiffSeries:
-        def __init__(self, ometiff, series_number):
+        def __init__(self, ometiff, series_number, resolutions, rgb, interleaved):
+            ns = {'ome': 'http://www.openmicroscopy.org/Schemas/OME/2016-06'}
             self.ometiff = ometiff
-            self.series_metadata = ometiff.series_metadata[series_number]
+            self.Number = series_number
+            self.Resolutions = resolutions
+            self.RGB = rgb
+            self.Image = ometiff.omexml.find(f'ome:Image[{series_number+1}]', ns)
+            self.ome_mods = {}
+            self.Interleaved = interleaved
+            self.Thumbnail = True if (self.Name == 'label image' or self.Name == 'macro image') else False
+            self.Channels = [{**{k: OMETiff.map_value(v) for k, v in c.attrib.items()}, **{'RGB': self.RGB}}
+                             for c in self.Pixels.findall('./ome:Channel', ns)]
 
         @property
-        def RGB(self):
-            return self.series_metadata['RGB']
+        def Name(self):
+            return self.Image.get('Name')
+
+        @property
+        def ID(self):
+            return self.Image.get('ID')
 
         @property
         def Type(self):
-            return self.series_metadata['Type']
+            return self.Pixels.get('Type')
+
+        @Type.setter
+        def Type(self, value):
+            self.Pixels.set('Type', value)
 
         @property
         def Interleaved(self):
-            return self.series_metadata['Interleaved']
+            return OMETiff.map_value(self.Pixels.get('Interleaved'))
+
+        @Interleaved.setter
+        def Interleaved(self, value):
+            self.Pixels.set('Interleaved', 'true' if value else 'false')
 
         @property
-        def Number(self):
-            return self.series_metadata['Number']
+        def Pixels(self):
+            ns = {'ome': 'http://www.openmicroscopy.org/Schemas/OME/2016-06'}
+            return self.Image.find('.//ome:Pixels', ns)
 
         @property
-        def Channels(self):
-            return self.series_metadata['Channels']
+        def Planes(self):
+            ns = {'ome': 'http://www.openmicroscopy.org/Schemas/OME/2016-06'}
+            return self.Pixels.findall('ome:Plane', ns)
+
+        def generate_iiif_tiff(self, series, filename,
+                               z=0, channel_number=0,
+                               tile_size=1024,
+                               resolutions=None, compression='ZSTD'):
+            start_time = time.time()
+
+            outfile = IIIF_FILE.format(file=filename, s=self.Number, z=z, c=channel_number)
+
+            # Compute the number of pyramid levels required so get at 1K pixels
+            resolutions = int(math.log2(max(self.SizeX, self.SizeY)) - 9) if resolutions is None else resolutions
+
+            if len(series.axes) == 4 and not (series.axes[0:2] == 'ZC' or series.axes[0:2] == 'CZ'):
+                raise OMETiff.ConversionError('Tiff file with wrong number of axes: {}.'.format(series.axes))
+
+            # Calculate which image in the series corresponds to Z and Channel.
+            plane = self.image_plane(z, channel_number)
+            logger.info(f'generating iiif tiff with {resolutions} levels: z:{z} C:{channel_number} -> plane {plane}')
+
+            with TiffWriter(outfile, bigtiff=True) as tiff_out:
+                # Compute resolution (pixels/cm) from physical size per pixel and units.
+                options = dict(tile=(tile_size, tile_size),
+                               compress=('jpeg', 100) if compression.lower() == 'jpeg' else compression,
+                               description=f"Single image plane from {filename}",
+                               resolution=(
+                                   1 / self.PhysicalSize[0], 1 / self.PhysicalSize[1],
+                                   'CENTIMETER'),
+                               metadata=None)
+                image = series[plane].asarray()
+
+                ns = {'ome': 'http://www.openmicroscopy.org/Schemas/OME/2016-06'}
+                iiif_omexml = self.iiif_omexml(z, channel_number)
+                iiif_pixels = iiif_omexml.getroot().find('.//ome:Pixels', ns)
+
+                if compression == 'jpeg' and self.Type == 'uint16':
+                    image = skimage.util.img_as_ubyte(image)
+                    iiif_pixels.set('Type', 'uint8')
+                    self.ome_mods['Type'] = 'uint8'
+                if series[0].photometric.name == 'RGB' and series[0].planarconfig.name == 'SEPARATE':
+                    logger.info('interleaving RGB....')
+                    assert (len(series[plane].axes) == 3)
+                    image = image.transpose(1, 2, 0)  # Interleaved image has to have S as last dimension.
+                    options.update({'photometric': 'RGB', 'planarconfig': 'CONTIG'})
+                    iiif_pixels.set('Interleaved', "true")
+                    self.ome_mods['Interleaved'] = 'true'
+
+                logger.info(f'writing pyramid with {resolutions} levels ....')
+                tiff_out.save(image, **options)
+                for i in range(1, resolutions):
+                    tiff_out.save(image[::2 ** i, ::2 ** i], subfiletype=1, **options)
+
+            # Now add OMEXML data...
+            set_omexml(outfile, iiif_omexml)
+
+            logger.info('generate_iiif_tiff execution time: {}'.format(time.time() - start_time))
 
         # Calculate which image in the series corresponds to Z and Channel.
         def image_plane(self, z_plane, channel_number):
-            return self.series_metadata['Planes'].index((z_plane, channel_number))
-
-        @property
-        def Size(self):
             """
-            Size of image X,Y, Z in pixels
+            Given a Z plane and channel number, return the index of the plane for the corresponding image.
+            :param z_plane:
+            :param channel_number:
             :return:
             """
-            return (self.series_metadata['SizeX'],
-             self.series_metadata['SizeY'],
-             self.series_metadata['SizeZ'])
+
+            ns = {'ome': 'http://www.openmicroscopy.org/Schemas/OME/2016-06'}
+            for i, p in enumerate(self.Pixels.findall('.//ome:Plane', ns)):
+                if int(p.get('TheZ')) == z_plane and int(p.get('TheC')) == channel_number:
+                    return i
+            raise OMETiff.ConversionError(f'Could not find image plane for z:{z_plane} channel:{channel_number}')
+
+        def iiif_omexml(self, z, channel):
+            """
+            Restructure the OME-TIFF XML description to only include specified z plane and channel.
+            :param z:
+            :param channel:
+            :return:
+            """
+
+            ns = {'ome': 'http://www.openmicroscopy.org/Schemas/OME/2016-06',
+                  'xsi': "http://www.w3.org/2001/XMLSchema-instance"}
+
+            subset_omexml = copy.deepcopy(self.ometiff.omexml.getroot())
+            subset_omexml.set('UUID', f'urn:uuid:{self.ometiff.uuid[(self.Number, z, channel)]}')
+
+            # Pick out the image we want....
+            for i, image in enumerate(subset_omexml.findall('.//ome:Image', ns)):
+                if i != self.Number:
+                    subset_omexml.remove(image)
+
+            # Update Pixel....
+            pixels = subset_omexml.find('.//ome:Pixels', ns)
+            pixels.set('SizeC', "1")
+            pixels.set('SizeZ', "1")
+
+            tiffdata = subset_omexml.findall('.//ome:TiffData', ns)
+            if len(pixels.findall('.//ome:TiffData', ns)) != 1:
+                raise OMETiff.ConversionError("More than one TiffData element")
+            tiffdata = tiffdata[0]
+
+            for i, channel_element in enumerate(pixels.findall('.//ome:Channel', ns)):
+                if i != channel:
+                    pixels.remove(channel_element)
+            tiffdata.set("IFD", "0")
+            tiffdata.set("PlaneCount", "1")
+            tiffdata.set("FirstC", str(channel))
+            tiffdata.set("FirstZ", str(z))
+            return ET.ElementTree(subset_omexml)
+
+        def z_omexml(self, z):
+            ns = {'ome': 'http://www.openmicroscopy.org/Schemas/OME/2016-06',
+                  'xsi': "http://www.w3.org/2001/XMLSchema-instance"}
+
+            omexml = self.ometiff.multifile_omexml().getroot()
+
+            # Pick out the image we want....
+            for i, image in enumerate(omexml.findall('.//ome:Image', ns)):
+                if i != self.Number:
+                    omexml.remove(image)
+
+            # Update Pixel....
+            pixels = omexml.find('.//ome:Pixels', ns)
+            pixels.set('SizeZ', "1")
+
+            for tiffdata in pixels.findall('.//ome:TiffData', ns):
+                if int(tiffdata.get('FirstZ')) != z:
+                    pixels.remove(tiffdata)
+
+            return ET.ElementTree(omexml)
+
+        @property
+        def SizeX(self):
+            return int(self.Pixels.get('SizeX'))
+
+        @property
+        def SizeY(self):
+            return int(self.Pixels.get('SizeY'))
+
+        @property
+        def SizeZ(self):
+            return int(self.Pixels.get('SizeZ'))
+
+        @property
+        def SizeC(self):
+            return int(self.Pixels.get('SizeC'))
 
         @property
         def PhysicalSize(self):
@@ -80,38 +236,21 @@ class OMETiff:
             :return:
             """
             return (
-                self.series_metadata['PhysicalSizeX'] / (10000 if self.series_metadata['PhysicalSizeXUnit'] == 'µm' else 1),
-                self.series_metadata['PhysicalSizeY'] / (10000 if self.series_metadata['PhysicalSizeYUnit'] == 'µm' else 1))
+                float(self.Pixels.get('PhysicalSizeX')) / (
+                    10000 if self.Pixels.get('PhysicalSizeXUnit') == 'µm' else 1),
+                float(self.Pixels.get('PhysicalSizeY')) / (
+                    10000 if self.Pixels.get('PhysicalSizeYUnit') == 'µm' else 1))
 
     class ConversionError(Exception):
         def __init__(self, msg):
             self.msg = msg
 
     def __init__(self, filename):
-        def map_value(i):
-            s = re.search('= (.+)', i)
-            if s:
-                x = s.group(1)
-            else:
-                x = i
-            if 'true' in x:
-                return True
-            elif 'false' in x:
-                return False
-            m = re.search('([0-9]+) x ([0-9]+)', x)
-            if m:
-                return int(m.group(1)), int(m.group(2))
-            if 'effectively 1' in x:
-                return 1
-            try:
-                return int(x)
-            except ValueError:
-                try:
-                    return float(x)
-                except ValueError:
-                    return x
-
         self.filename = filename
+        self.filebase = re.sub(r'((\.ome)\.tiff?)?$', '', os.path.basename(filename))
+        self.uuid = {}
+        self.series = []
+
         logger.info("Getting {} metadata....".format(filename))
 
         with TiffFile(filename) as tf:
@@ -122,74 +261,125 @@ class OMETiff:
             ns = {'ome': 'http://www.openmicroscopy.org/Schemas/OME/2016-06',
                   'xsi': "http://www.w3.org/2001/XMLSchema-instance"}
 
+            ET.register_namespace('', ns['ome'])
             for k, v in ns.items():
                 ET.register_namespace(k, v)
 
-            self.series_metadata = []
+            images = self.omexml.findall('ome:Image', ns)
+            if len(images) != len(tf.series):
+                raise OMETiff.ConversionError("TIFF image count doesn't match OME metadata")
 
-            for c, e in enumerate(self.omexml.findall('ome:Image', ns)):
-                # Add in attributes to indicate the position of the Scene in a CZI file.
-                i = {'Number': c, 'Name': e.attrib['Name'], 'ID': e.attrib['ID']}
+            for series_number, s in enumerate(tf.series):
+                self.series.append(
+                    OMETiff.OMETiffSeries(self,
+                                          series_number,
+                                          len(s.levels),
+                                          s.pages[0].photometric.name == 'RGB',
+                                          s.pages[0].planarconfig.name == 'CONTIG')
+                )
 
-                # Add information from stage label so we can determine physical position of series on the slide.
-                stage = e.find('./ome:StageLabel', ns)
-                if stage is not None:
-                    i.update(**{k: map_value(v) for k, v in stage.attrib.items() if k != 'ID'})
+            logger.info('Number of series is {}'.format(len(self.series)))
 
-                # Add in attributes of Pixels element, but don't include Pixel element ID..
-                pixels = e.find('./ome:Pixels', ns)
-                i.update(**{k: map_value(v) for k, v in pixels.attrib.items() if k != 'ID'})
+            for i in self.series:
+                for z in range(i.SizeZ):
+                    for c in range(i.SizeC):
+                        self.uuid[(i.Number, z, c)] = uuid.uuid1()
 
-                # Now add in the details about the channels
-                i['Channels'] = [{k: map_value(v) for k, v in c.attrib.items()}
-                                 for c in pixels.findall('./ome:Channel', ns)]
+    def _json_metadata(self):
+        # Go through the XML and collect up information about channels for each image.
+        # Now get the OME-XML version.
+        ns = {'ome': 'http://www.openmicroscopy.org/Schemas/OME/2016-06',
+              'xsi': "http://www.w3.org/2001/XMLSchema-instance"}
+        omejson = []
 
-                # Look in planes element to determine mapping of Z and C to planes in the series.
-                i['Planes'] = [
-                    (int(p.attrib['TheZ']), int(p.attrib['TheC'])) for p in pixels.findall('./ome:Plane', ns)
-                ]
-                self.series_metadata.append(i)
+        for s in self.series:
+            # Add in attributes to indicate the position of the Scene in a CZI file.
+            i = {'Number': s.Number, 'Name': s.Name, 'ID': s.ID}
 
-            logger.info('Number of series is {}'.format(len(self.series_metadata)))
+            # Add information from stage label so we can determine physical position of series on the slide.
+            stage = s.Image.find('./ome:StageLabel', ns)
+            if stage is not None:
+                i.update(**{k: self.map_value(v) for k, v in stage.attrib.items() if k != 'ID'})
 
-            if len(self.series_metadata) != len(tf.series):
-                raise OMETiff.ConversionError("TIFF image count doesn't match OME metatada")
-            for i, s in zip(self.series_metadata, tf.series):
-                i['Resolutions'] = len(s.levels)
-                i['RGB'] = s.pages[0].photometric.name == 'RGB'
-                for c in i['Channels']:
-                    c['RGB'] = i['RGB']  # Add RGB attribute to each channel.
-                i['Interleaved'] = s.pages[0].planarconfig.name == 'CONTIG'
-                i['Thumbnail series'] = True if (i['Name'] == 'label image' or i['Name'] == 'macro image') else False
+            # Add in attributes of Pixels element, but don't include Pixel element ID.
+            i.update(**{k: self.map_value(v) for k, v in s.Pixels.attrib.items() if k != 'ID'})
 
-            # Compute ordinial position of image planes in the tiff file, taking into account multiple series and
-            # multiple resolutions assuming that the noflat option was not used.
-            # Also set Thumbnail series based on image name.
-            series_offset = 0
-            plane_offset = 0
-            for i in self.series_metadata:
-                i['Flattened series'] = series_offset
-                i['Flattened planes'] = plane_offset
-                series_offset += i['Resolutions']
-                plane_offset += len(i['Planes'])
+            # Now add in the details about the channels
+            i['Channels'] = s.Channels
+            i['Resolutions'] = s.Resolutions
+            i['RGB'] = s.RGB
+            i['Interleaved'] = s.Interleaved
+            i['Thumbnail series'] = s.Thumbnail
 
-            self.series_metadata = [i for i in self.series_metadata if not i['Thumbnail series']]
-            self.series = [OMETiff.OMETiffSeries(self, i) for i in range(len(self.series_metadata))]
+            omejson.append(i)
+        return omejson
 
     def dump(self, filename):
         # Clean up metadata removing internal keys
         with open(filename + '.json', 'w') as f:
-            f.write(json.dumps(
-                [
-                    {k: v for k, v in s.items() if (k != 'Flattened series' or k != 'Resolutions')}
-                    for s in self.series_metadata
-                ],
-                indent=4))
+            f.write(json.dumps(self._json_metadata(), indent=4))
 
         self.omexml.write(filename + '.xml')
+        self.multifile_omexml().write(filename + '.companion.ome',
+                                      encoding='UTF-8',
+                                      method='xml')
+        for s in self.series:
+            for z in range(s.SizeZ):
+                s.z_omexml(z).write(f'{filename}_S{s.Number}_Z{z}.companion.ome',
+                                              encoding='UTF-8',
+                                              method='xml')
 
-    def series(self, series_number):
-        return OMETiff.OMETiffSeries(self, series_number)
+
+    def multifile_omexml(self):
+
+        ns = {'ome': 'http://www.openmicroscopy.org/Schemas/OME/2016-06'}
+        root = copy.deepcopy(self.omexml.getroot())
+        multifile_omexml = ET.Element(root.tag, root.attrib)
+
+        image_number = -1
+        for image in root:
+            if image.tag != "{http://www.openmicroscopy.org/Schemas/OME/2016-06}Image":
+                multifile_omexml.append(image)
+                continue
+
+            # Got image element
+            image_number += 1
+            new_image = ET.SubElement(multifile_omexml, image.tag, image.attrib)
+
+            if len(image.findall('.//ome:TiffData', ns)) != 1:
+                raise OMETiff.ConversionError("More than one TiffData element")
+
+            for pixels in image:
+                if pixels.tag != "{http://www.openmicroscopy.org/Schemas/OME/2016-06}Pixels":
+                    new_image.append(pixels)
+                    continue
+
+                # Update OME with any changes that had to be made when generating IIIF version of image.
+                new_pixels = ET.SubElement(new_image, pixels.tag, {** pixels.attrib, **self.series[image_number].ome_mods})
+                planes = pixels.findall('ome:Plane', ns)
+                tiffdata_tag = "{http://www.openmicroscopy.org/Schemas/OME/2016-06}TiffData"
+                uuid_tag = "{http://www.openmicroscopy.org/Schemas/OME/2016-06}UUID"
+
+                for tiffdata in pixels:
+                    if tiffdata.tag != tiffdata_tag:
+                        new_pixels.append(tiffdata)
+                        continue
+                    if len(planes) != int(tiffdata.get('PlaneCount')):
+                        raise OMETiff.ConversionError("Planes doen't match TiffData PlaneCount")
+                    for plane in planes:
+                        z = int(plane.get('TheZ', default='0'))
+                        c = int(plane.get('TheC', default='0'))
+                        t = int(plane.get('TheT', default='0'))
+                        new_tiffdata = ET.SubElement(new_pixels,
+                                                     tiffdata_tag,
+                                                     {'FirstC': str(c), 'FirstT': str(t), 'FirstZ': str(z), 'IFD': "0",
+                                                      'PlaneCount': "1"}
+                                                     )
+                        tifffile = os.path.basename(IIIF_FILE.format(file=self.filebase, s=image_number, z=z, c=c))
+                        uuid_element = ET.SubElement(new_tiffdata, uuid_tag, {'FileName': tifffile})
+                        uuid_element.text = f"urn:uuid:{self.uuid[(image_number, z, c)]}"
+
+        return ET.ElementTree(multifile_omexml)
 
     @staticmethod
     def generate_ome_tiff(infile, outfile):
@@ -219,10 +409,34 @@ class OMETiff:
                            env=BF_ENV, check=True, capture_output=True, universal_newlines=True)
         logger.info('execution time: {}'.format(time.time() - start_time))
 
+    @staticmethod
+    def map_value(i):
+        s = re.search('= (.+)', i)
+        if s:
+            x = s.group(1)
+        else:
+            x = i
+        if 'true' in x:
+            return True
+        elif 'false' in x:
+            return False
+        m = re.search('([0-9]+) x ([0-9]+)', x)
+        if m:
+            return int(m.group(1)), int(m.group(2))
+        if 'effectively 1' in x:
+            return 1
+        try:
+            return int(x)
+        except ValueError:
+            try:
+                return float(x)
+            except ValueError:
+                return x
+
 
 def is_tiff(filename):
     # True if filename ends in tif or tiff and not .ome.tiff or .ome.tif
-    return True if re.search('(?<!\.ome)\.tiff?$', filename) else False
+    return True if re.search(r'(?<!\.ome)\.tiff?$', filename) else False
 
 
 def is_ome_tiff(filename):
@@ -290,77 +504,12 @@ def set_omexml(file, omexml):
     return omexml
 
 
-def split_tiff_by_z(imagefile, ometiff_file, series, z=None, compression='LZW', overwrite=False,
-                    autoscale=False):
-    """
-    Split an imagefile into a set of OME Tiff files with a single S/Z per file.  Each file will have a single resolution
-    but potentially multiple channels.
-
-    :param imagefile: Path of the file which contains the input data. Can be any image formate recognized by bioformats.
-    :param ometiff_file: Path to output file.  Needs to be an OME-TIFF file.
-    :param series: Series metadata to extract from converted OME-TIF file. If None, extract all series.
-    :param z: z plane to extract, if None, extract all.
-    :param compression:
-    :param overwrite: Overwrite existing OME-TIFF files
-    :param autoscale: Pass autoscale argument to bfconvert used to generate final tiff file.
-    :return:
-    """
-
-    logger.info("Series {} -> {}".format(series['Number'], series['Flattened series']))
-
-    # Generate per-series/per-z OME-TIFF
-    zplanes = range(series['SizeZ']) if z is None else [z]
-    for zplane in zplanes:
-        series_ome_tiff = '{}-S{}-Z{}.ome.tif'.format(ometiff_file, series['Number'], zplane)
-        bfconvert(imagefile, series_ome_tiff,
-                  z=zplane, series=series['Flattened series'],
-                  overwrite=overwrite, autoscale=autoscale, compression=compression)
-
-
-def generate_iiif_tiff(series, series_metadata, filename,
-                       z=0, channel_number=0,
-                       tile_size=1024,
-                       resolutions=None, compression='ZSTD'):
-    start_time = time.time()
-
-    outfile = IIIF_FILE.format(file=filename, s=series_metadata.Number, z=z, c=channel_number)
-    # Calculate which image in the series corresponds to Z and Channel.
-    plane = series_metadata.image_plane(z, channel_number)
-
-    # Compute the number of pyramid levels required so get at 1K pixels
-    resolutions = int(math.log2(max(series[plane].shape)) - 10) if resolutions is None else resolutions
-
-    if len(series.axes) == 4 and not (series.axes[0:2] == 'ZC' or series.axes[0:2] == 'CZ'):
-        raise OMETiff.ConversionError('Tiff file with wrong number of axes: {}.'.format(series.axes))
-
-    logger.info(f'generating iiif tiff with {resolutions} levels: z:{z} C:{channel_number} -> plane {plane}')
-    with TiffWriter(outfile, bigtiff=True) as tiff_out:
-        # Compute resolution (pixels/cm) from physical size per pixel and units.
-        options = dict(tile=(tile_size, tile_size), compress=compression,
-                       resolution=(1/series_metadata.PhysicalSize[0], 1/series_metadata.PhysicalSize[1], 'CENTIMETER'),
-                       metadata=None)
-        image = series[plane].asarray()
-        if series[0].photometric.name == 'RGB' and series[0].planarconfig.name == 'SEPARATE':
-            logger.info('interleaving RGB....')
-            assert(len(series[plane].axes) == 3)
-            image = image.transpose(1, 2, 0)   # Interleaved image has to have S as last dimension.
-            options.update({'photometric': 'RGB', 'planarconfig': 'CONTIG'})
-        elif (not series_metadata.RGB) and compression == 'jpeg' and series_metadata.Type == 'uint16':
-            image = skimage.util.img_as_ubyte(image)
-
-        tiff_out.save(image, **options)
-        for i in range(1, resolutions):
-            tiff_out.save(image[::i * 2, ::i * 2], subfiletype=1, **options)
-    logger.info('generate_iiif_tiff execution time: {}'.format(time.time() - start_time))
-
-
-def seadragon_tiffs(image_path, z_planes=None, split_z=False, delete_ome=False, compression='ZSTD'):
+def seadragon_tiffs(image_path, z_planes=None, delete_ome=False, compression='ZSTD'):
     """
 
     :param image_path: Input image file in any format recognized by bioformats
     :param z_planes: Which z_plane to select.
                     If None, output complete Z-stack, if 'middle' output representitive plane.
-    :param split_z: Generate multichannel files for each Z plane.
     :param delete_ome: Remove the intermediate OME-TIFF files
     :param compression: Compression method to use for IIIF files.
     :return:
@@ -379,7 +528,7 @@ def seadragon_tiffs(image_path, z_planes=None, split_z=False, delete_ome=False, 
     filename = filename + '/' + filename
 
     # If file is in a different format, generate ome-tiff.
-    # Get OME-TIFF version of inputfile
+    # Get OME-TIFF version of inputfil
     ome_tiff_file = filename + '.ome.tif'
     if is_ome_tiff(image_path):
         ome_tiff_file = image_path
@@ -393,14 +542,13 @@ def seadragon_tiffs(image_path, z_planes=None, split_z=False, delete_ome=False, 
     # Now go through series.....
     with TiffFile(ome_tiff_file) as ome_tiff:
         for series in ome_contents.series:
-            _,_,size_z = series.Size
             # Pick the slice in the middle, if there is a Z stack and z_plane is  'middle'
-            z_plane = int(math.ceil(size_z / 2) - 1) if z_planes == 'middle' else z_planes
+            z_plane = int(math.ceil(series.SizeZ / 2) - 1) if z_planes == 'middle' else z_planes
 
             # Now convert this single image to a pyramid with jpeg compressed tiles, which is going to be
             # good for openseadragon.  Need to iterate over each channel and z-plane. Note that the number of
             # "effective" channels may be different then the value of SizeC.
-            for z in range(size_z) if z_plane is None else [z_plane]:
+            for z in range(series.SizeZ) if z_plane is None else [z_plane]:
                 for channel_number, channel in enumerate(series.Channels):
                     # Get the channel name out of the info we have for the channel, use the ID if there is no name.
                     channel_name = channel.get('Name', channel['ID'])
@@ -409,12 +557,9 @@ def seadragon_tiffs(image_path, z_planes=None, split_z=False, delete_ome=False, 
                                                                                       channel_name,
                                                                                       z))
                     # Generate a iiif file for the page that corresponds to this channel.
-                    generate_iiif_tiff(ome_tiff.series[series.Number], series, filename,
+                    series.generate_iiif_tiff(ome_tiff.series[series.Number], filename,
                                        z=z, channel_number=channel_number,
                                        compression=compression)
-            if split_z:
-                split_tiff_by_z(filename, series, z, ome_contents.omexml, compression=compression)
-
     if delete_ome:
         os.remove(ome_tiff_file)
 
