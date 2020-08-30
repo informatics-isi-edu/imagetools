@@ -239,10 +239,16 @@ class OMETiff:
                 raise OMETiff.ConversionError("More than one TiffData element")
             tiffdata = tiffdata[0]
 
+            # Update tiffdata element to reflect that we have a single channel.
+            for i, channel_element in enumerate(pixels.findall('.//ome:Channel', self.ns)):
+                 if i != channel:
+                     pixels.remove(channel_element)
+
             # Update tiffdata element to reflect that we have a single plane.
-            # for i, channel_element in enumerate(pixels.findall('.//ome:Channel', ns)):
-            #     if i != channel:
-            #         pixels.remove(channel_element)
+            for i, plane_element in enumerate(pixels.findall('.//ome:Plane', self.ns)):
+                 if int(plane_element.attrib['TheC']) != channel or int(plane_element.attrib['TheZ']) != z:
+                     pixels.remove(plane_element)
+
             tiffdata.set("IFD", "0")
             tiffdata.set("PlaneCount", "1")
             tiffdata.set("FirstC", str(channel))
