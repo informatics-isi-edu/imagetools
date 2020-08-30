@@ -457,28 +457,18 @@ class OMETiff:
 
     @staticmethod
     def map_value(i):
-        s = re.search('= (.+)', i)
-        if s:
-            x = s.group(1)
-        else:
-            x = i
-        if 'true' in x:
+        # Map XML values to Python values.
+        if i == 'true':
             return True
-        elif 'false' in x:
+        if i == 'false':
             return False
-        m = re.search('([0-9]+) x ([0-9]+)', x)
-        if m:
-            return int(m.group(1)), int(m.group(2))
-        if 'effectively 1' in x:
-            return 1
         try:
-            return int(x)
+            return int(i)
         except ValueError:
             try:
-                return float(x)
+                return float(i)
             except ValueError:
-                return x
-
+                return i
 
 def is_tiff(filename):
     # True if filename ends in tif or tiff and not .ome.tiff or .ome.tif
