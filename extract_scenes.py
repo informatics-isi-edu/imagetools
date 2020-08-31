@@ -365,7 +365,6 @@ class OMETiff:
         with open(filename + '.json', 'w') as f:
             f.write(json.dumps(self._json_metadata(), indent=4))
 
-        self.omexml.write(filename + '.xml')
         self.multifile_omexml().write(filename + '.companion.ome',
                                       encoding='UTF-8',
                                       method='xml')
