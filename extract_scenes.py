@@ -30,19 +30,21 @@ RAW2OMETIFF_CMD = '/usr/local/bin/raw2ometiff'
 # Make sure we have enough memory to run bfconvert on big files
 BF_ENV = dict(os.environ, **{'BF_MAX_MEM': '24g'})
 
-
 # Templates for output file names.
 IIIF_FILE = "{file}_S{s}_Z{z}_C{c}.ome.tif"
 Z_OME_FILE = "{file}_S{s}_Z{z}.ome.tif"
+
 
 class OMETiff:
     """
     Class use to manipulate OME Tiff Metadata.
     """
+
     class OMETiffSeries:
         """
         Class to represent OMEXML metadata for an image series which consists of multiple planes.
         """
+
         def __init__(self, ometiff, series_number, resolutions, rgb, interleaved):
             """
             Sometimes the value of RGB and Interleaved in the metadata doesn't match up with what is actually in the
@@ -60,7 +62,7 @@ class OMETiff:
             self.Number = series_number
             self.Resolutions = resolutions
             self.RGB = rgb
-            self.Image = ometiff.omexml.find(f'ome:Image[{series_number+1}]', self.ns)
+            self.Image = ometiff.omexml.find(f'ome:Image[{series_number + 1}]', self.ns)
             self.ome_mods = {}
             self.Interleaved = interleaved
             self.Thumbnail = True if (self.Name == 'label image' or self.Name == 'macro image') else False
@@ -241,13 +243,13 @@ class OMETiff:
 
             # Update tiffdata element to reflect that we have a single channel.
             for i, channel_element in enumerate(pixels.findall('.//ome:Channel', self.ns)):
-                 if i != channel:
-                     pixels.remove(channel_element)
+                if i != channel:
+                    pixels.remove(channel_element)
 
             # Update tiffdata element to reflect that we have a single plane.
             for i, plane_element in enumerate(pixels.findall('.//ome:Plane', self.ns)):
-                 if int(plane_element.attrib['TheC']) != channel or int(plane_element.attrib['TheZ']) != z:
-                     pixels.remove(plane_element)
+                if int(plane_element.attrib['TheC']) != channel or int(plane_element.attrib['TheZ']) != z:
+                    pixels.remove(plane_element)
 
             tiffdata.set("IFD", "0")
             tiffdata.set("PlaneCount", "1")
@@ -289,7 +291,7 @@ class OMETiff:
         self.uuid = {}
         self.series = []
         self.ns = {'ome': 'http://www.openmicroscopy.org/Schemas/OME/2016-06',
-              'xsi': "http://www.w3.org/2001/XMLSchema-instance"}
+                   'xsi': "http://www.w3.org/2001/XMLSchema-instance"}
 
         logger.info("Getting {} metadata....".format(filename))
 
@@ -365,16 +367,14 @@ class OMETiff:
         with open(filename + '.json', 'w') as f:
             f.write(json.dumps(self._json_metadata(), indent=4))
 
-        self.omexml.write(filename + '.xml')
         self.multifile_omexml().write(filename + '.companion.ome',
                                       encoding='UTF-8',
                                       method='xml')
         for s in self.series:
             for z in range(s.SizeZ):
                 s.z_omexml(z).write(f'{filename}_S{s.Number}_Z{z}.companion.ome',
-                                              encoding='UTF-8',
-                                              method='xml')
-
+                                    encoding='UTF-8',
+                                    method='xml')
 
     def multifile_omexml(self):
         """
@@ -405,7 +405,8 @@ class OMETiff:
                     continue
 
                 # Update OME with any changes that had to be made when generating IIIF version of image.
-                new_pixels = ET.SubElement(new_image, pixels.tag, {** pixels.attrib, **self.series[image_number].ome_mods})
+                new_pixels = ET.SubElement(new_image, pixels.tag,
+                                           {**pixels.attrib, **self.series[image_number].ome_mods})
                 planes = pixels.findall('ome:Plane', self.ns)
                 tiffdata_tag = "{http://www.openmicroscopy.org/Schemas/OME/2016-06}TiffData"
                 uuid_tag = "{http://www.openmicroscopy.org/Schemas/OME/2016-06}UUID"
@@ -476,6 +477,7 @@ class OMETiff:
             except ValueError:
                 return i
 
+
 def is_tiff(filename):
     # True if filename ends in tif or tiff and not .ome.tiff or .ome.tif
     return True if re.search(r'(?<!\.ome)\.tiff?$', filename) else False
@@ -485,59 +487,18 @@ def is_ome_tiff(filename):
     return True if filename.endswith('.ome.tif') or filename.endswith('.ome.tiff') else False
 
 
-def bfconvert(infile, outfile, args=None,
-              series=None, z=None, channel=None,
-              compression='LZW', overwrite=False, autoscale=False):
-    """
-    Run the bioformats file converter command.
-    :param infile:
-    :param outfile:
-    :param args: Additional arguements to command
-    :param series: Series number to extract
-    :param z: Z channel number to extract
-    :param channel: Channel number to extract
-    :param compression:
-    :param overwrite:
-    :param autoscale:
-    :return:
-    """
-    logger.info('bfconvert: {} -> {}'.format(infile, outfile))
-    start_time = time.time()
-    bfconvert_args = ['-cache', '-tilex', '1024', '-tiley', '1024']
-    if overwrite:
-        bfconvert_args.append('-overwrite')
-    if compression:
-        bfconvert_args.extend(['-compression', compression])
-    if autoscale:
-        bfconvert_args.append('-autoscale')
-    if series is not None:
-        bfconvert_args.extend(['-series', str(series)])
-    if z is not None:
-        bfconvert_args.extend(['-z', str(z)])
-    if channel is not None:
-        bfconvert_args.extend(['-channel', str(channel)])
-
-    if args:
-        bfconvert_args.extend(args)
-    result = subprocess.run([BFCONVERT_CMD] + bfconvert_args + [infile, outfile],
-                            env=BF_ENV, check=True, capture_output=True, universal_newlines=True)
-    if result.stdout:
-        logger.info(result.stdout)
-
-    logger.info('bfconvert {}->{} execution time: {}'.format(infile, outfile, time.time() - start_time))
-
-
 def get_omexml(file):
     """
     Get the omexml metadata froma file.
     """
     result = subprocess.run(
-            [TIFFCOMMENT_CMD, file],
-            env=BF_ENV, check=True, capture_output=True, universal_newlines=True)
+        [TIFFCOMMENT_CMD, file],
+        env=BF_ENV, check=True, capture_output=True, universal_newlines=True)
     if result.stderr:
         logger.info(result.stderr)
         raise OMETiff.ConversionError(result.stderr)
     return ET.ElementTree(ET.fromstring(result.stdout))
+
 
 def set_omexml(file, omexml):
     """
@@ -614,8 +575,8 @@ def seadragon_tiffs(image_path, z_planes=None, delete_ome=False, compression='ZS
                                                                                       z))
                     # Generate a iiif file for the page that corresponds to this channel.
                     series.generate_iiif_tiff(ome_tiff.series[series.Number], filename,
-                                       z=z, channel_number=channel_number,
-                                       compression=compression)
+                                              z=z, channel_number=channel_number,
+                                              compression=compression)
     if delete_ome:
         os.remove(ome_tiff_file)
 
