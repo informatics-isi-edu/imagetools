@@ -3,6 +3,7 @@ import json
 import logging
 import math
 import os
+import pyvips
 import re
 import sys
 import subprocess
@@ -34,6 +35,7 @@ BF_ENV = dict(os.environ, **{'BF_MAX_MEM': '24g'})
 # Templates for output file names.
 IIIF_FILE = "{file}_S{s}_Z{z}_C{c}.ome.tif"
 Z_OME_FILE = "{file}_S{s}_Z{z}.ome.tif"
+
 
 class OMETiff:
     """
@@ -129,6 +131,59 @@ class OMETiff:
                 float(self.Pixels.get('PhysicalSizeY')) / (
                     10000 if self.Pixels.get('PhysicalSizeYUnit') == 'µm' else 1))
 
+        def generate_iiif_tiff_new(self, omefile, filename,
+                               z=0, channel_number=0,
+                               tile_size=1024,
+                               resolutions=None, compression='ZSTD'):
+            """
+            Create an new TIFF File that consists of a single Image plane and appropriate OME metadata.
+            Use the IIIF pyramid format, which is a series of images, not a SubIFD that is used by OME.
+            :param series: tifffile.TiffPageSeries
+            :param filename: Base name of the output file.
+            :param z: Z plane to use
+            :param channel_number:  Number of the channel to select
+            :param tile_size: Tile size used, defaults to 1Kx1K
+            :param resolutions: Number of pyramid resolutions to generate, defaults to 1K top pyramid size.
+            :param compression: Compression algorithm to use in generated file
+            :return:
+            """
+            start_time = time.time()
+
+            outfile = IIIF_FILE.format(file=filename, s=self.Number, z=z, c=channel_number)
+
+            # Calculate which image in the series corresponds to Z and Channel.
+            plane = self.image_plane(z, channel_number)
+            logger.info(f'generating iiif tiff with {resolutions} levels: z:{z} C:{channel_number} -> plane {plane}')
+            image = pyvips.Image.tiffload(omefile, page=plane)
+
+            iiif_omexml = self.iiif_omexml(z, channel_number)  # Get single plan OME-XML
+            iiif_pixels = iiif_omexml.getroot().find('.//ome:Pixels', self.ns)
+
+            # image = image.copy()
+            # if compression == 'jpeg' and self.Type == 'uint16':
+            #     # JPEG compression requires that data be 8 bit, not 16
+            #     image = skimage.util.img_as_ubyte(image)
+            #     iiif_pixels.set('Type', 'uint8')
+            #     self.ome_mods['Type'] = 'uint8'  # Keep track of changes made to metadata for later use
+            if image.interpretation == pyvips.enums.Interpretation.SRGB and image.bands == 3:
+                print('yep')
+                # Downstream tools will prefer interleaved RGB format, so convert image to that format.
+                logger.info('interleaving RGB....')
+                image = image[0].bandjoin([image[1], image[2]])
+                iiif_pixels.set('Interleaved', "true")
+                self.ome_mods['Interleaved'] = 'true'  # Keep track of changes made to metadata for later use
+
+            logger.info(f'writing pyramid with {resolutions} levels ....')
+            # Write out image data, and layers of pyramid. Layers are produced by just subsampling image, which
+            # is consistant with what is done in bioformats libary.
+            image.tiffsave(outfile,
+                        pyramid=True,
+                        bigtiff=True,
+                        compression='jpeg',
+                        tile=True, tile_width=1024, tile_height=1024)
+
+            logger.info('generate_iiif_tiff execution time: {}'.format(time.time() - start_time))
+
         def generate_iiif_tiff(self, series, filename,
                                z=0, channel_number=0,
                                tile_size=1024,
@@ -157,46 +212,57 @@ class OMETiff:
 
             # Calculate which image in the series corresponds to Z and Channel.
             plane = self.image_plane(z, channel_number)
+            iiif_omexml = self.iiif_omexml(z, channel_number)  # Get single plan OME-XML
+            iiif_pixels = iiif_omexml.getroot().find('.//ome:Pixels', self.ns)
+
             logger.info(f'generating iiif tiff with {resolutions} levels: z:{z} C:{channel_number} -> plane {plane}')
 
-            with TiffWriter(outfile, bigtiff=True) as tiff_out:
-                # Compute resolution (pixels/cm) from physical size per pixel and units.
-                # If compression is jpeg, set quality level to be 100.
-                options = dict(tile=(tile_size, tile_size),
-                               compress=('jpeg', 100) if compression.lower() == 'jpeg' else compression,
-                               description=f"Single image plane from {filename}",
-                               resolution=(
-                                   1 / self.PhysicalSize[0], 1 / self.PhysicalSize[1],
-                                   'CENTIMETER'),
-                               metadata=None)
-                image = series[plane].asarray()
+            with tempfile.NamedTemporaryFile(suffix='.ome.tif') as tmpfile:
+                with TiffWriter(tmpfile, bigtiff=True) as tiff_out:
+                    # Compute resolution (pixels/cm) from physical size per pixel and units.
+                    # If compression is jpeg, set quality level to be 100.
+                    options = dict(tile=(tile_size, tile_size),
+                                   description=f"Single image plane from {filename}",
+                                   resolution=(
+                                       1 / self.PhysicalSize[0], 1 / self.PhysicalSize[1],
+                                       'CENTIMETER'),
+                                   metadata=None)
+                    image = series[plane].asarray()
 
-                iiif_omexml = self.iiif_omexml(z, channel_number)  # Get single plan OME-XML
-                iiif_pixels = iiif_omexml.getroot().find('.//ome:Pixels', self.ns)
 
-                if compression == 'jpeg' and self.Type == 'uint16':
-                    # JPEG compression requires that data be 8 bit, not 16
-                    image = skimage.util.img_as_ubyte(image)
-                    iiif_pixels.set('Type', 'uint8')
-                    self.ome_mods['Type'] = 'uint8'  # Keep track of changes made to metadata for later use
-                if series[0].photometric.name == 'RGB' and series[0].planarconfig.name == 'SEPARATE':
-                    # Downstream tools will prefer interleaved RGB format, so convert image to that format.
-                    logger.info('interleaving RGB....')
-                    assert (len(series[plane].axes) == 3)
-                    image = image.transpose(1, 2, 0)  # Interleaved image has to have S as last dimension.
-                    options.update({'photometric': 'RGB', 'planarconfig': 'CONTIG'})
-                    iiif_pixels.set('Interleaved', "true")
-                    self.ome_mods['Interleaved'] = 'true'  # Keep track of changes made to metadata for later use
 
-                logger.info(f'writing pyramid with {resolutions} levels ....')
-                # Write out image data, and layers of pyramid. Layers are produced by just subsampling image, which
-                # is consistant with what is done in bioformats libary.
-                tiff_out.save(image, **options)
-                for i in range(1, resolutions):
-                    tiff_out.save(image[::2 ** i, ::2 ** i], subfiletype=1, **options)
+                    vipsfile = self.ometiff.filename
+                    vipsplane = plane
 
-            # Now add OMEXML data to the output.  Because OMEXML is unicode encoded, we cannot write this in tifffile.
-            set_omexml(outfile, iiif_omexml)
+                    if compression == 'jpeg' and self.Type == 'uint16':
+                        # JPEG compression requires that data be 8 bit, not 16
+             #           image = skimage.util.img_as_ubyte(image)
+                        iiif_pixels.set('Type', 'uint8')
+                        self.ome_mods['Type'] = 'uint8'  # Keep track of changes made to metadata for later use
+                    if series[0].photometric.name == 'RGB' and series[0].planarconfig.name == 'SEPARATE':
+                        # Downstream tools will prefer interleaved RGB format, so convert image to that format.
+                        logger.info('interleaving RGB....')
+                        assert (len(series[plane].axes) == 3)
+                        image = image.transpose(1, 2, 0)  # Interleaved image has to have S as last dimension.
+                        options.update({'photometric': 'RGB', 'planarconfig': 'CONTIG'})
+                        iiif_pixels.set('Interleaved', "true")
+                        self.ome_mods['Interleaved'] = 'true'  # Keep track of changes made to metadata for later use
+                        vipsfile = tmpfile.name
+                        vipsplane = 0
+                        # Write out image data, and layers of pyramid. Layers are produced by just subsampling image, which
+                        # is consistant with what is done in bioformats libary.
+                    tiff_out.save(image, **options)
+
+               # image = pyvips.Image.tiffload(tmpfile.name)
+                image = pyvips.Image.tiffload(tmpfile.name)
+                image = image.copy()
+                image.set('image-description', ET.tostring(iiif_omexml.getroot(), encoding='unicode'))
+                image.tiffsave(outfile,
+                                pyramid=True,
+                                bigtiff=True,
+                                compression='jpeg', Q=90,
+                                tile=True, tile_width=1024, tile_height=1024)
+
 
             logger.info('generate_iiif_tiff execution time: {}'.format(time.time() - start_time))
 
@@ -482,80 +548,6 @@ def is_tiff(filename):
 
 def is_ome_tiff(filename):
     return True if filename.endswith('.ome.tif') or filename.endswith('.ome.tiff') else False
-
-
-def bfconvert(infile, outfile, args=None,
-              series=None, z=None, channel=None,
-              compression='LZW', overwrite=False, autoscale=False):
-    """
-    Run the bioformats file converter command.
-    :param infile:
-    :param outfile:
-    :param args: Additional arguements to command
-    :param series: Series number to extract
-    :param z: Z channel number to extract
-    :param channel: Channel number to extract
-    :param compression:
-    :param overwrite:
-    :param autoscale:
-    :return:
-    """
-    logger.info('bfconvert: {} -> {}'.format(infile, outfile))
-    start_time = time.time()
-    bfconvert_args = ['-cache', '-tilex', '1024', '-tiley', '1024']
-    if overwrite:
-        bfconvert_args.append('-overwrite')
-    if compression:
-        bfconvert_args.extend(['-compression', compression])
-    if autoscale:
-        bfconvert_args.append('-autoscale')
-    if series is not None:
-        bfconvert_args.extend(['-series', str(series)])
-    if z is not None:
-        bfconvert_args.extend(['-z', str(z)])
-    if channel is not None:
-        bfconvert_args.extend(['-channel', str(channel)])
-
-    if args:
-        bfconvert_args.extend(args)
-    result = subprocess.run([BFCONVERT_CMD] + bfconvert_args + [infile, outfile],
-                            env=BF_ENV, check=True, capture_output=True, universal_newlines=True)
-    if result.stdout:
-        logger.info(result.stdout)
-
-    logger.info('bfconvert {}->{} execution time: {}'.format(infile, outfile, time.time() - start_time))
-
-
-def get_omexml(file):
-    """
-    Get the omexml metadata froma file.
-    """
-    result = subprocess.run(
-            [TIFFCOMMENT_CMD, file],
-            env=BF_ENV, check=True, capture_output=True, universal_newlines=True)
-    if result.stderr:
-        logger.info(result.stderr)
-        raise OMETiff.ConversionError(result.stderr)
-    return ET.ElementTree(ET.fromstring(result.stdout))
-
-def set_omexml(file, omexml):
-    """
-    Set the OME XML field field of a file. This will only work if the tag is already in the file.
-    :param file: File to set the description in.
-    :param omexml: OME-XML tree
-    :return: OME-XML value
-    """
-    with tempfile.TemporaryDirectory() as tmpdirname:
-        xmlfile = f'{tmpdirname}/ometif.xml'
-        omexml.write(xmlfile, encoding='unicode')
-        args = ['-set', xmlfile, file]
-        result = subprocess.run(
-            [TIFFCOMMENT_CMD] + args,
-            env=BF_ENV, check=True, capture_output=True, universal_newlines=True)
-        if result.stderr:
-            logger.info(result.stderr)
-    return omexml
-
 
 def seadragon_tiffs(image_path, z_planes=None, delete_ome=False, compression='ZSTD'):
     """
