@@ -31,7 +31,7 @@ RAW2OMETIFF_CMD = '/usr/local/bin/raw2ometiff'
 BF_ENV = dict(os.environ, **{'BF_MAX_MEM': '24g'})
 
 # Templates for output file names.
-IIIF_FILE = "{file}_S{s}_Z{z}_C{c}.ome.tif"
+IIIF_FILE = "{file}-s{s}-z{z}-c{c}.ome.tif"
 Z_OME_FILE = "{file}_S{s}_Z{z}.ome.tif"
 
 
@@ -149,7 +149,7 @@ class OMETiff:
             """
             start_time = time.time()
 
-            outfile = IIIF_FILE.format(file=filename, s=self.Number, z=z, c=channel_number)
+            outfile = IIIF_FILE.format(file=filename, s=self.Number, z='0000{}'.format(z)[-4:], c=channel_number)
 
             # Compute the number of pyramid levels required so get at 1K pixels at the top of the pyramid.
             resolutions = int(math.log2(max(self.SizeX, self.SizeY)) - 9) if resolutions is None else resolutions
@@ -372,7 +372,7 @@ class OMETiff:
                                       method='xml')
         for s in self.series:
             for z in range(s.SizeZ):
-                s.z_omexml(z).write(f'{filename}_S{s.Number}_Z{z}.companion.ome',
+                s.z_omexml(z).write(f'{filename}-s{s.Number}-z{"0000{}".format(z)[-4:]}.companion.ome',
                                     encoding='UTF-8',
                                     method='xml')
 
@@ -428,7 +428,7 @@ class OMETiff:
                                                      {'FirstC': str(c), 'FirstT': str(t), 'FirstZ': str(z), 'IFD': "0",
                                                       'PlaneCount': "1"}
                                                      )
-                        tifffile = os.path.basename(IIIF_FILE.format(file=self.filebase, s=image_number, z=z, c=c))
+                        tifffile = os.path.basename(IIIF_FILE.format(file=self.filebase, s=image_number, z='0000{}'.format(z)[-4:], c=c))
                         uuid_element = ET.SubElement(new_tiffdata, uuid_tag, {'FileName': tifffile})
                         uuid_element.text = f"urn:uuid:{self.uuid[(image_number, z, c)]}"
 
