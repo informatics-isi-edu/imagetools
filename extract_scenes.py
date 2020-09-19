@@ -33,6 +33,7 @@ BF_ENV = dict(os.environ, **{'BF_MAX_MEM': '24g'})
 # Templates for output file names.
 IIIF_FILE = "{file}-s{s}-z{z}-c{c}.ome.tif"
 Z_OME_FILE = "{file}_S{s}_Z{z}.ome.tif"
+NUMBER_OF_Z_INDEX = None
 
 
 class OMETiff:
@@ -149,7 +150,7 @@ class OMETiff:
             """
             start_time = time.time()
 
-            outfile = IIIF_FILE.format(file=filename, s=self.Number, z='0000{}'.format(z)[-4:], c=channel_number)
+            outfile = IIIF_FILE.format(file=filename, s=self.Number, z=z_string(z), c=channel_number)
 
             # Compute the number of pyramid levels required so get at 1K pixels at the top of the pyramid.
             resolutions = int(math.log2(max(self.SizeX, self.SizeY)) - 9) if resolutions is None else resolutions
@@ -372,7 +373,7 @@ class OMETiff:
                                       method='xml')
         for s in self.series:
             for z in range(s.SizeZ):
-                s.z_omexml(z).write(f'{filename}-s{s.Number}-z{"0000{}".format(z)[-4:]}.companion.ome',
+                s.z_omexml(z).write(f'{filename}-s{s.Number}-z{z_string(z)}.companion.ome',
                                     encoding='UTF-8',
                                     method='xml')
 
@@ -428,7 +429,7 @@ class OMETiff:
                                                      {'FirstC': str(c), 'FirstT': str(t), 'FirstZ': str(z), 'IFD': "0",
                                                       'PlaneCount': "1"}
                                                      )
-                        tifffile = os.path.basename(IIIF_FILE.format(file=self.filebase, s=image_number, z='0000{}'.format(z)[-4:], c=c))
+                        tifffile = os.path.basename(IIIF_FILE.format(file=self.filebase, s=image_number, z=z_string(z), c=c))
                         uuid_element = ET.SubElement(new_tiffdata, uuid_tag, {'FileName': tifffile})
                         uuid_element.text = f"urn:uuid:{self.uuid[(image_number, z, c)]}"
 
@@ -519,6 +520,16 @@ def set_omexml(file, omexml):
     return omexml
 
 
+def z_string(z):
+    if NUMBER_OF_Z_INDEX < 10:
+        return '0{}'.format(z)[-1:]
+    elif NUMBER_OF_Z_INDEX < 100:
+        return '00{}'.format(z)[-2:]
+    elif NUMBER_OF_Z_INDEX < 1000:
+        return '000{}'.format(z)[-3:]
+    else:
+        return '0000{}'.format(z)[-4:]
+
 def seadragon_tiffs(image_path, z_planes=None, delete_ome=False, compression='ZSTD'):
     """
     Convert an OME-TIFF file into a set of IIIF compatible TIFF files.
@@ -532,6 +543,8 @@ def seadragon_tiffs(image_path, z_planes=None, delete_ome=False, compression='ZS
     :return:
     """
 
+    global NUMBER_OF_Z_INDEX
+    
     image_file = os.path.basename(image_path)
     if is_ome_tiff(image_path):
         filename = re.sub('.ome.tiff?', '', image_file)
@@ -565,6 +578,8 @@ def seadragon_tiffs(image_path, z_planes=None, delete_ome=False, compression='ZS
             # Now convert this single image to a pyramid with jpeg compressed tiles, which is going to be
             # good for openseadragon.  Need to iterate over each channel and z-plane. Note that the number of
             # "effective" channels may be different then the value of SizeC.
+            if NUMBER_OF_Z_INDEX == None:
+                NUMBER_OF_Z_INDEX = series.SizeZ
             for z in range(series.SizeZ) if z_plane is None else [z_plane]:
                 for channel_number, channel in enumerate(series.Channels):
                     # Get the channel name out of the info we have for the channel, use the ID if there is no name.
