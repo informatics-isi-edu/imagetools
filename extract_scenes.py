@@ -521,9 +521,8 @@ def set_omexml(file, omexml):
 
 
 def z_string(z):
-    z_length = len('{}'.format(NUMBER_OF_Z_INDEX))
-    zero_prefix = '0' * z_length
-    return '{}{}'.format(zero_prefix,z)[-z_length:]
+    z_length = len(str(NUMBER_OF_Z_INDEX))
+    return ('0' * z_length + str(z))[-z_length:]
 
 def seadragon_tiffs(image_path, z_planes=None, delete_ome=False, compression='ZSTD'):
     """
