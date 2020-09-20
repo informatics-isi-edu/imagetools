@@ -521,14 +521,9 @@ def set_omexml(file, omexml):
 
 
 def z_string(z):
-    if NUMBER_OF_Z_INDEX < 10:
-        return '0{}'.format(z)[-1:]
-    elif NUMBER_OF_Z_INDEX < 100:
-        return '00{}'.format(z)[-2:]
-    elif NUMBER_OF_Z_INDEX < 1000:
-        return '000{}'.format(z)[-3:]
-    else:
-        return '0000{}'.format(z)[-4:]
+    z_length = len('{}'.format(NUMBER_OF_Z_INDEX))
+    zero_prefix = '0' * z_length
+    return '{}{}'.format(zero_prefix,z)[-z_length:]
 
 def seadragon_tiffs(image_path, z_planes=None, delete_ome=False, compression='ZSTD'):
     """
