@@ -335,6 +335,15 @@ class OMETiff:
         :return:
         """
 
+        def convert_rgb(number):
+            """
+            Convert a signed number into a proper RGB value.
+            :param number:
+            :return:
+            """
+            number &= 2 ** 24 - 1
+            return [(number >> 16) & 0xFF, (number >> 8) & 0xFF, number & 0xFF]
+
         omejson = []
 
         for s in self.series:
@@ -349,8 +358,8 @@ class OMETiff:
             # Add in attributes of Pixels element, but don't include Pixel element ID.
             i.update(**{k: self.map_value(v) for k, v in s.Pixels.attrib.items() if k != 'ID'})
 
-            # Now add in the details about the channels
-            i['Channels'] = s.Channels
+            # Now add in the details about the channels, convert integer version of Color to list of RGB.
+            i['Channels'] = [{k: convert_rgb(v) if k == 'Color' else v for k, v in c.items()} for c in s.Channels]
             i['Resolutions'] = s.Resolutions
             i['RGB'] = s.RGB
             i['Interleaved'] = s.Interleaved
@@ -524,7 +533,7 @@ def z_string(z):
     z_length = len(str(NUMBER_OF_Z_INDEX))
     return ('0' * z_length + str(z))[-z_length:]
 
-def seadragon_tiffs(image_path, z_planes=None, delete_ome=False, compression='ZSTD'):
+def seadragon_tiffs(image_path, z_planes=None, delete_ome=False, compression='ZSTD', tile_size=1024):
     """
     Convert an OME-TIFF file into a set of IIIF compatible TIFF files.
     Also generate companion files so that set can be viewed as entire file, or single Z planes.
@@ -585,7 +594,8 @@ def seadragon_tiffs(image_path, z_planes=None, delete_ome=False, compression='ZS
                     # Generate a iiif file for the page that corresponds to this channel.
                     series.generate_iiif_tiff(ome_tiff.series[series.Number], filename,
                                               z=z, channel_number=channel_number,
-                                              compression=compression)
+                                              compression=compression,
+                                              tile_size=tile_size)
     if delete_ome:
         os.remove(ome_tiff_file)
 
@@ -593,10 +603,10 @@ def seadragon_tiffs(image_path, z_planes=None, delete_ome=False, compression='ZS
     return ome_contents
 
 
-def main(imagefile, compression='jpeg'):
+def main(imagefile, compression='jpeg', tile_size=1024):
     try:
         start_time = time.time()
-        seadragon_tiffs(imagefile, compression=compression)
+        seadragon_tiffs(imagefile, compression=compression, tile_size=tile_size)
         print("--- %s seconds ---" % (time.time() - start_time))
         return 0
     except subprocess.CalledProcessError as r:
