@@ -335,14 +335,18 @@ class OMETiff:
         :return:
         """
 
-        def convert_rgb(number):
+        def convert_rgba(number):
             """
             Convert a signed number into a proper RGB value.
             :param number:
             :return:
             """
-            number &= 2 ** 24 - 1
-            return [(number >> 16) & 0xFF, (number >> 8) & 0xFF, number & 0xFF]
+           # number &= 2 ** 24 - 1   # Mask out lower 24 bits for RGB part.
+            R = (number >> 24) & 0xFF
+            G = (number >> 16) & 0xFF
+            B = (number >> 8) & 0xFF
+            A = number & 0xFF
+            return [R, G, B]
 
         omejson = []
 
@@ -359,7 +363,7 @@ class OMETiff:
             i.update(**{k: self.map_value(v) for k, v in s.Pixels.attrib.items() if k != 'ID'})
 
             # Now add in the details about the channels, convert integer version of Color to list of RGB.
-            i['Channels'] = [{k: convert_rgb(v) if k == 'Color' else v for k, v in c.items()} for c in s.Channels]
+            i['Channels'] = [{k: convert_rgba(v) if k == 'Color' else v for k, v in c.items()} for c in s.Channels]
             i['Resolutions'] = s.Resolutions
             i['RGB'] = s.RGB
             i['Interleaved'] = s.Interleaved
