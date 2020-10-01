@@ -346,7 +346,7 @@ class OMETiff:
             G = (number >> 16) & 0xFF
             B = (number >> 8) & 0xFF
             A = number & 0xFF
-            return [R, G, B]
+            return f"0x{R:02x}{G:02x}{B:02x}"
 
         omejson = []
 
