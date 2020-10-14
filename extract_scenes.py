@@ -392,7 +392,7 @@ class OMETiff:
 
     def multifile_omexml(self):
         """
-        Create OME XML for a companion file by replacing TIFFData elements in XML with versions that incude the
+        Create OME XML for a companion file by replacing TIFFData elements in XML with versions that includes the
         UUID tag.
         :return:
         """
@@ -429,8 +429,7 @@ class OMETiff:
                     if tiffdata.tag != tiffdata_tag:
                         new_pixels.append(tiffdata)
                         continue
-                    if len(planes) != int(tiffdata.get('PlaneCount')):
-                        raise OMETiff.ConversionError("Planes doen't match TiffData PlaneCount")
+
                     for plane in planes:
                         # Generate a new TIFFData element for each plane in the image.  Format is:
                         # <TiffData><UUID>uuid</UUID></TIFFData>
