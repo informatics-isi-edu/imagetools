@@ -4,6 +4,7 @@ import logging
 import math
 import os
 import re
+import resource
 import sys
 import subprocess
 import tempfile
@@ -45,6 +46,7 @@ class OMETiff:
         """
         Class to represent OMEXML metadata for an image series which consists of multiple planes.
         """
+        JPEG_QUALITY = 80
 
         def __init__(self, ometiff, series_number, resolutions, rgb, interleaved):
             """
@@ -164,9 +166,9 @@ class OMETiff:
 
             with TiffWriter(outfile, bigtiff=True) as tiff_out:
                 # Compute resolution (pixels/cm) from physical size per pixel and units.
-                # If compression is jpeg, set quality level to be 100.
+                # If compression is jpeg, set quality level to be JPEG_QUALITY.
                 options = dict(tile=(tile_size, tile_size),
-                               compress=('jpeg', 100) if compression.lower() == 'jpeg' else compression,
+                               compress=('jpeg', self.JPEG_QUALITY) if compression.lower() == 'jpeg' else compression,
                                description=f"Single image plane from {filename}",
                                resolution=(
                                    1 / self.PhysicalSize[0], 1 / self.PhysicalSize[1],
@@ -611,6 +613,10 @@ def main(imagefile, compression='jpeg', tile_size=1024):
         start_time = time.time()
         seadragon_tiffs(imagefile, compression=compression, tile_size=tile_size)
         print("--- %s seconds ---" % (time.time() - start_time))
+        usage = resource.getrusage(resource.RUSAGE_SELF)
+        print(f"  utime: {usage.ru_utime}")
+        print(f"  stime: {usage.ru_stime}")
+        print(f"  maxrss {usage.ru_maxrss}")
         return 0
     except subprocess.CalledProcessError as r:
         print(r.cmd)
