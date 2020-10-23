@@ -171,16 +171,16 @@ class OMETiff:
                                compress=('jpeg', self.JPEG_QUALITY) if compression.lower() == 'jpeg' else compression,
                                description=f"Single image plane from {filename}",
                                resolution=(
-                                   1 / self.PhysicalSize[0], 1 / self.PhysicalSize[1],
+                                   round(1 / self.PhysicalSize[0]), round(1 / self.PhysicalSize[1]),
                                    'CENTIMETER'),
                                metadata=None)
                 image = series[plane].asarray()
 
                 iiif_omexml = self.iiif_omexml(z, channel_number)  # Get single plan OME-XML
                 iiif_pixels = iiif_omexml.getroot().find('.//ome:Pixels', self.ns)
-
                 if compression == 'jpeg' and self.Type == 'uint16':
                     # JPEG compression requires that data be 8 bit, not 16
+                    logger.info(f'Converting from uint16 to uint8')
                     image = skimage.util.img_as_ubyte(image)
                     iiif_pixels.set('Type', 'uint8')
                     self.ome_mods['Type'] = 'uint8'  # Keep track of changes made to metadata for later use
@@ -193,10 +193,11 @@ class OMETiff:
                     iiif_pixels.set('Interleaved', "true")
                     self.ome_mods['Interleaved'] = 'true'  # Keep track of changes made to metadata for later use
 
-                logger.info(f'writing pyramid with {resolutions} levels ....')
+                logger.info(f'writing base image....')
                 # Write out image data, and layers of pyramid. Layers are produced by just subsampling image, which
                 # is consistant with what is done in bioformats libary.
                 tiff_out.save(image, **options)
+                logger.info(f'writing pyramid with {resolutions} levels ....')
                 for i in range(1, resolutions):
                     tiff_out.save(image[::2 ** i, ::2 ** i], subfiletype=1, **options)
 
@@ -327,6 +328,7 @@ class OMETiff:
 
             # Create a UUID for each file so we can do multifile OME-TIFF
             for i in self.series:
+                logger.info(f'Series {i.Number} Number of Z: {i.SizeZ} Number of C: {i.SizeC}')
                 for z in range(i.SizeZ):
                     for c in range(i.SizeC):
                         self.uuid[(i.Number, z, c)] = uuid.uuid1()
