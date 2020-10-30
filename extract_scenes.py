@@ -460,6 +460,31 @@ class OMETiff:
         :param outfile:
         :return:
         """
+        def rgb_arg(n5_file):
+            """
+            Calulate effective number of channels to figure out if we should use the rgb argument when generating
+            the OME-TIFF.  If the number of channels is 3, and the number of effective channels is 1, then you
+            need the arguement.
+            :param n5_file:
+            :return:
+            """
+            omexml = ET.parse(f'{n5_file}/METADATA.ome.xml')
+            # Assume all the series are the same so just pick out the first one
+            ns = {'ome': 'http://www.openmicroscopy.org/Schemas/OME/2016-06'}
+            pixels = omexml.find('ome:Image', ns).find('.//ome:Pixels', ns)
+
+            if pixels.get('SizeC') != '3':  # Can only be RGB if there are 3 channels.
+                return []
+
+            # Assume that there is one Plane element per image plane....
+            image_count = len(pixels.findall('ome:Plane', ns))
+
+            # NB: by definition, imageCount == effectiveSizeC * sizeZ * sizeT
+            sizeZT = int(pixels.get('SizeZ')) * int(pixels.get('SizeT'))
+            if (sizeZT == 0):
+                return []
+            return ['--rgb'] if image_count / sizeZT == 1 else []
+
         start_time = time.time()
         filename, _ext = os.path.splitext(os.path.basename(infile))
 
@@ -474,8 +499,7 @@ class OMETiff:
                            env=BF_ENV, check=True, capture_output=True, universal_newlines=True)
             logger.info('converting to ome-tiff')
             subprocess.run([RAW2OMETIFF_CMD,
-                            '--rgb',
-                            '--compression=LZW'] + [n5_file, outfile],
+                            '--compression=LZW'] + rgb_arg(n5_file) + [n5_file, outfile],
                            env=BF_ENV, check=True, capture_output=True, universal_newlines=True)
         logger.info('execution time: {}'.format(time.time() - start_time))
 
