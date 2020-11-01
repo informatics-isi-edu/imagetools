@@ -48,7 +48,7 @@ class OMETiff:
         """
         JPEG_QUALITY = 80
 
-        def __init__(self, ometiff, series_number, resolutions, rgb, interleaved):
+        def __init__(self, ometiff, series_number, resolutions, interleaved):
             """
             Sometimes the value of RGB and Interleaved in the metadata doesn't match up with what is actually in the
             image. This constructure has abilityto patch up these errors.
@@ -56,7 +56,6 @@ class OMETiff:
             :param ometiff: Reference to OMETiff instance the contains this series
             :param series_number: Number of this series, integeter.
             :param resolutions: Number of pyramid resolutions in this pyramid
-            :param rgb: True or False
             :param interleaved:  True or False
             """
             self.ns = ometiff.ns
@@ -64,12 +63,11 @@ class OMETiff:
             self.ometiff = ometiff
             self.Number = series_number
             self.Resolutions = resolutions
-            self.RGB = rgb
             self.Image = ometiff.omexml.find(f'ome:Image[{series_number + 1}]', self.ns)
             self.ome_mods = {}
             self.Interleaved = interleaved
             self.Thumbnail = True if (self.Name == 'label image' or self.Name == 'macro image') else False
-
+            self.RGB = self.Pixels.find('./ome:Channel', self.ns).attrib['SamplesPerPixel'] == '3'
             # Create a dictionary of values in Channels to simplify usage
             self.Channels = [{**{k: OMETiff.map_value(v) for k, v in c.attrib.items()}, **{'RGB': self.RGB}}
                              for c in self.Pixels.findall('./ome:Channel', self.ns)]
@@ -301,7 +299,6 @@ class OMETiff:
 
         with TiffFile(filename) as tf:
             self.omexml = ET.ElementTree(ET.fromstring(tf.ome_metadata))
-
             # Go through the XML and collect up information about channels for each image.
             # Now get the OME-XML version.
 
@@ -311,7 +308,9 @@ class OMETiff:
 
             images = self.omexml.findall('ome:Image', self.ns)
             if len(images) != len(tf.series):
-                raise OMETiff.ConversionError("TIFF image count doesn't match OME metadata")
+                raise OMETiff.ConversionError(
+                    f"TIFF image count doesn't match OME metadataL {len(images)} {len(tf.series)}"
+                )
 
             # Create series object for each series in the OME TIFF file.  Use RGB and Interleaved values from
             # Image as sometimes OME TIFF metadata is not right on these.
@@ -320,7 +319,6 @@ class OMETiff:
                     OMETiff.OMETiffSeries(self,
                                           series_number,
                                           len(s.levels),
-                                          s.pages[0].photometric.name == 'RGB',
                                           s.pages[0].planarconfig.name == 'CONTIG')
                 )
 
@@ -452,6 +450,14 @@ class OMETiff:
         return ET.ElementTree(multifile_omexml)
 
     @staticmethod
+    def is_rgb(omexml):
+        ns = {'ome': 'http://www.openmicroscopy.org/Schemas/OME/2016-06'}
+
+        rgb = False
+        # Look for  images with three samples per channels....
+        return False if omexml.find(".//ome:Channel[@SamplesPerPixel='3']", ns) is None else True
+
+    @staticmethod
     def generate_ome_tiff(infile, outfile):
         """
         Use bioformats2raw and raw2ometiff to generate an OME tiff version of infile.  To make things simple downstream,
@@ -460,30 +466,6 @@ class OMETiff:
         :param outfile:
         :return:
         """
-        def rgb_arg(n5_file):
-            """
-            Calulate effective number of channels to figure out if we should use the rgb argument when generating
-            the OME-TIFF.  If the number of channels is 3, and the number of effective channels is 1, then you
-            need the arguement.
-            :param n5_file:
-            :return:
-            """
-            omexml = ET.parse(f'{n5_file}/METADATA.ome.xml')
-            # Assume all the series are the same so just pick out the first one
-            ns = {'ome': 'http://www.openmicroscopy.org/Schemas/OME/2016-06'}
-            pixels = omexml.find('ome:Image', ns).find('.//ome:Pixels', ns)
-
-            if pixels.get('SizeC') != '3':  # Can only be RGB if there are 3 channels.
-                return []
-
-            # Assume that there is one Plane element per image plane....
-            image_count = len(pixels.findall('ome:Plane', ns))
-
-            # NB: by definition, imageCount == effectiveSizeC * sizeZ * sizeT
-            sizeZT = int(pixels.get('SizeZ')) * int(pixels.get('SizeT'))
-            if (sizeZT == 0):
-                return []
-            return ['--rgb'] if image_count / sizeZT == 1 else []
 
         start_time = time.time()
         filename, _ext = os.path.splitext(os.path.basename(infile))
@@ -492,15 +474,21 @@ class OMETiff:
         with tempfile.TemporaryDirectory(dir=TMPDIR) as tmpdirname:
             n5_file = '{}/{}_n5'.format(tmpdirname, filename)
             logger.info('converting to n5 format')
-            subprocess.run([BIOFORMATS2RAW_CMD,
+            result = subprocess.run([BIOFORMATS2RAW_CMD,
                             '--resolutions=1',
                             '--tile_height=4096', '--tile_width=4096'] +
                            [infile, n5_file],
                            env=BF_ENV, check=True, capture_output=True, universal_newlines=True)
             logger.info('converting to ome-tiff')
-            subprocess.run([RAW2OMETIFF_CMD,
-                            '--compression=LZW'] + rgb_arg(n5_file) + [n5_file, outfile],
+            if result.stderr:
+                logger.info(result.stderr)
+            result = subprocess.run([RAW2OMETIFF_CMD,
+                            '--compression=LZW'] +
+                           (['--rgb'] if OMETiff.is_rgb(ET.parse(f"{n5_file}/METADATA.ome.xml")) else []) +
+                           [n5_file, outfile],
                            env=BF_ENV, check=True, capture_output=True, universal_newlines=True)
+            if result.stderr:
+                logger.info(result.stderr)
         logger.info('execution time: {}'.format(time.time() - start_time))
 
     @staticmethod
