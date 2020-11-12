@@ -129,11 +129,15 @@ class OMETiff:
             Size of X, Y and Z in centimeters.
             :return:
             """
-            return (
-                float(self.Pixels.get('PhysicalSizeX')) / (
-                    10000 if self.Pixels.get('PhysicalSizeXUnit') == 'µm' else 1),
-                float(self.Pixels.get('PhysicalSizeY')) / (
-                    10000 if self.Pixels.get('PhysicalSizeYUnit') == 'µm' else 1))
+            try:
+                return (
+                    float(self.Pixels.get('PhysicalSizeX')) / (
+                        10000 if self.Pixels.get('PhysicalSizeXUnit') == 'µm' else 1),
+                    float(self.Pixels.get('PhysicalSizeY')) / (
+                        10000 if self.Pixels.get('PhysicalSizeYUnit') == 'µm' else 1))
+            except TypeError:
+                # No physical size attribute provided.
+                return None
 
         def generate_iiif_tiff(self, filename,
                                z=0, channel_number=0,
@@ -165,10 +169,11 @@ class OMETiff:
                 options = dict(tile=(tile_size, tile_size),
                                compress=('jpeg', self.JPEG_QUALITY) if compression.lower() == 'jpeg' else compression,
                                description=f"Single image plane from {filename}",
-                               resolution=(
-                                   round(1 / self.PhysicalSize[0]), round(1 / self.PhysicalSize[1]),
-                                   'CENTIMETER'),
                                metadata=None)
+                physical_size  = self.PhysicalSize
+                if physical_size is not None:
+                    options['resolution'] =(round(1 / physical_size[0]), round(1 / physical_size[1]), 'CENTIMETER')
+
                 # Assuming that we are XYCZT ordering, pick out the specified Z plane from the ZARR data assuming T=0.
                 image = self.zarr_series['0'][0, z, :, :, :]
 
@@ -230,9 +235,11 @@ class OMETiff:
             tiffdata = ET.Element(tiffdata_tag,
                                   attrib={"IFD": "0", "PlaneCount": "1", "FirstC": str(channel), "FirstZ": str(z)})
 
-            # Insert tiffdata element before the first Plane element...
-            pixels.insert(list(pixels).index(pixels.find('.//ome:Plane', self.ns)), tiffdata)
-
+            # Insert tiffdata element before the first Plane element or at end of pixels...
+            try:
+                pixels.insert(list(pixels).index(pixels.find('.//ome:Plane', self.ns)), tiffdata)
+            except ValueError:  # No planes in XML, so just append.
+                pixels.append(tiffdata)
             # Remove other channel definitions....
             for i, channel_element in enumerate(pixels.findall('.//ome:Channel', self.ns)):
                 if i != channel:
@@ -341,6 +348,7 @@ class OMETiff:
 
             # Now add in the details about the channels, convert integer version of Color to list of RGB.
             i['Channels'] = [{k: convert_rgba(v) if k == 'Color' else v for k, v in c.items()} for c in s.Channels]
+            i['Planes'] = [{k: self.map_value(v)  for k, v in c.items()} for c in s.Planes]
             i['Resolutions'] = s.Resolutions
             i['RGB'] = s.RGB
             i['Interleaved'] = s.Interleaved
@@ -374,6 +382,18 @@ class OMETiff:
         :return:
         """
 
+        def generate_tiffdata(c, z, t=0):
+            tiffdata_tag = "{http://www.openmicroscopy.org/Schemas/OME/2016-06}TiffData"
+            uuid_tag = "{http://www.openmicroscopy.org/Schemas/OME/2016-06}UUID"
+            new_tiffdata = ET.Element(tiffdata_tag,
+                                      {'FirstC': str(c), 'FirstT': str(t), 'FirstZ': str(z), 'IFD': "0",
+                                       'PlaneCount': "1"}
+                                      )
+            tifffile = os.path.basename(IIIF_FILE.format(file=self.filebase, s=image_number, z=z_string(z), c=c))
+            uuid_element = ET.SubElement(new_tiffdata, uuid_tag, {'FileName': tifffile})
+            uuid_element.text = f"urn:uuid:{self.uuid[(image_number, z, c)]}"
+            return new_tiffdata
+
         multifile_omexml = copy.deepcopy(self.omexml.getroot())
 
         for image_number, image in enumerate(multifile_omexml.findall('.//ome:Image', self.ns)):
@@ -385,25 +405,19 @@ class OMETiff:
             for k, v in self.series[image_number].ome_mods.items():
                 pixels.attrib[k] = v
             planes = pixels.findall('ome:Plane', self.ns)
-            tiffdata_tag = "{http://www.openmicroscopy.org/Schemas/OME/2016-06}TiffData"
-            uuid_tag = "{http://www.openmicroscopy.org/Schemas/OME/2016-06}UUID"
 
-            plane_index = list(pixels).index(planes[0])  # Get index of the first plane.
-            for plane in planes:
-                # Generate a new TIFFData element for each plane in the image.  Format is:
-                # <TiffData><UUID>uuid</UUID></TIFFData>
-                z = int(plane.get('TheZ', default='0'))
-                c = int(plane.get('TheC', default='0'))
-                t = int(plane.get('TheT', default='0'))
-                new_tiffdata = ET.Element(tiffdata_tag,
-                                          {'FirstC': str(c), 'FirstT': str(t), 'FirstZ': str(z), 'IFD': "0",
-                                           'PlaneCount': "1"}
-                                          )
-                pixels.insert(plane_index, new_tiffdata)
-                plane_index += 1
-                tifffile = os.path.basename(IIIF_FILE.format(file=self.filebase, s=image_number, z=z_string(z), c=c))
-                uuid_element = ET.SubElement(new_tiffdata, uuid_tag, {'FileName': tifffile})
-                uuid_element.text = f"urn:uuid:{self.uuid[(image_number, z, c)]}"
+            if len(planes) == 0:
+                pixels.append(generate_tiffdata(0, 0, 0))
+            else:
+                plane_index = list(pixels).index(planes[0])  # Get index of the first plane.
+                for plane in planes:
+                    # Generate a new TIFFData element for each plane in the image.  Format is:
+                    # <TiffData><UUID>uuid</UUID></TIFFData>
+                    z = int(plane.get('TheZ', default='0'))
+                    c = int(plane.get('TheC', default='0'))
+                    t = int(plane.get('TheT', default='0'))
+                    pixels.insert(plane_index, generate_tiffdata(c, z, t))
+                    plane_index += 1
 
         return ET.ElementTree(multifile_omexml)
 
