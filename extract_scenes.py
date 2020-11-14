@@ -49,7 +49,7 @@ class OMETiff:
         """
         JPEG_QUALITY = 80
 
-        def __init__(self, ometiff, series_number, series):
+        def __init__(self, ometiff, series_number):
             """
             Sometimes the value of RGB and Interleaved in the metadata doesn't match up with what is actually in the
             image. This constructure has abilityto patch up these errors.
@@ -63,7 +63,6 @@ class OMETiff:
 
             self.ometiff = ometiff
             self.Number = series_number
-            self.zarr_series = series
             self.Resolutions = 1
             self.Image = ometiff.omexml.find(f'ome:Image[{series_number + 1}]', self.ns)
             self.ome_mods = {}
@@ -170,32 +169,32 @@ class OMETiff:
                                    round(1 / self.PhysicalSize[0]), round(1 / self.PhysicalSize[1]),
                                    'CENTIMETER'),
                                metadata=None)
-                image = self.zarr_series['0'][0, z, :, :, :]  # T = 0, pick out Z plane. left with C, Y, X
+                with zarr.open(self.ometiff.zarr_file + '/data.zarr', 'r') as zarr_data:
+                    image = zarr_data[f'{z}/0'][0, z, :, :, :]  # Pick out array for T = 0 and full resolution.
+                    iiif_omexml = self.iiif_omexml(z, channel_number)  # Get single plan OME-XML
+                    iiif_pixels = iiif_omexml.getroot().find('.//ome:Pixels', self.ns)
+                    is_rgb = iiif_pixels.find('./ome:Channel', self.ns).attrib['SamplesPerPixel'] == '3'
+                    if compression == 'jpeg' and self.Type == 'uint16':
+                        # JPEG compression requires that data be 8 bit, not 16
+                        logger.info(f'Converting from uint16 to uint8')
+                        image = skimage.util.img_as_ubyte(image)
+                        iiif_pixels.set('Type', 'uint8')
+                        self.ome_mods['Type'] = 'uint8'  # Keep track of changes made to metadata for later use
+                    if is_rgb:
+                        # Downstream tools will prefer interleaved RGB format, so convert image to that format.
+                        logger.info('interleaving RGB....')
+                        image = np.moveaxis(image, 0, -1)  # Interleaved image has to have S as last dimension.
+                        options.update({'photometric': 'RGB', 'planarconfig': 'CONTIG'})
+                        iiif_pixels.attrib['Interleaved'] = "true"
+                        self.ome_mods['Interleaved'] = 'true'  # Keep track of changes made to metadata for later use
 
-                iiif_omexml = self.iiif_omexml(z, channel_number)  # Get single plan OME-XML
-                iiif_pixels = iiif_omexml.getroot().find('.//ome:Pixels', self.ns)
-                is_rgb = iiif_pixels.find('./ome:Channel', self.ns).attrib['SamplesPerPixel'] == '3'
-                if compression == 'jpeg' and self.Type == 'uint16':
-                    # JPEG compression requires that data be 8 bit, not 16
-                    logger.info(f'Converting from uint16 to uint8')
-                    image = skimage.util.img_as_ubyte(image)
-                    iiif_pixels.set('Type', 'uint8')
-                    self.ome_mods['Type'] = 'uint8'  # Keep track of changes made to metadata for later use
-                if is_rgb:
-                    # Downstream tools will prefer interleaved RGB format, so convert image to that format.
-                    logger.info('interleaving RGB....')
-                    image = np.moveaxis(image, 0, -1)  # Interleaved image has to have S as last dimension.
-                    options.update({'photometric': 'RGB', 'planarconfig': 'CONTIG'})
-                    iiif_pixels.attrib['Interleaved'] = "true"
-                    self.ome_mods['Interleaved'] = 'true'  # Keep track of changes made to metadata for later use
-
-                logger.info(f'writing base image....')
-                # Write out image data, and layers of pyramid. Layers are produced by just subsampling image, which
-                # is consistant with what is done in bioformats libary.
-                tiff_out.save(image, **options)
-                logger.info(f'writing pyramid with {resolutions} levels ....')
-                for i in range(1, resolutions):
-                    tiff_out.save(image[::2 ** i, ::2 ** i], subfiletype=1, **options)
+                    logger.info(f'writing base image....')
+                    # Write out image data, and layers of pyramid. Layers are produced by just subsampling image, which
+                    # is consistant with what is done in bioformats libary.
+                    tiff_out.save(image, **options)
+                    logger.info(f'writing pyramid with {resolutions} levels ....')
+                    for i in range(1, resolutions):
+                        tiff_out.save(image[::2 ** i, ::2 ** i], subfiletype=1, **options)
 
             # Now add OMEXML data to the output.  Because OMEXML is unicode encoded, we cannot write this in tifffile.
             set_omexml(outfile, iiif_omexml)
@@ -293,7 +292,7 @@ class OMETiff:
             self.msg = msg
 
     def __init__(self, filename):
-        self.filename = filename
+        self.zarr_file = filename
         self.filebase = re.sub(r'((\.ome)\.tiff?)?$', '', os.path.basename(filename))
         self.uuid = {}
         self.series = []
@@ -301,10 +300,11 @@ class OMETiff:
                    'xsi': "http://www.w3.org/2001/XMLSchema-instance"}
 
         logger.info("Getting {} metadata....".format(filename))
-        self.zarr_data = zarr.open(filename + '/data.zarr', 'r')
+      #  self.zarr_data = zarr.open(filename + '/data.zarr', 'r')
         self.omexml = ET.parse(f"{filename}/METADATA.ome.xml")
 
-        for pixels in self.omexml.findall('.//ome:Pixels',self.ns):
+        pixel_list = self.omexml.findall('.//ome:Pixels',self.ns)
+        for pixels in pixel_list:
             for e in pixels.findall('.//ome:MetadataOnly',self.ns):
                 pixels.remove(e)
 
@@ -312,8 +312,8 @@ class OMETiff:
         for k, v in self.ns.items():
             ET.register_namespace(k, v)
 
-        for series_number, series in self.zarr_data.groups():
-            self.series.append(OMETiff.OMETiffSeries(self, int(series_number), series))
+        for series_number in range(len(pixel_list)):
+            self.series.append(OMETiff.OMETiffSeries(self, int(series_number)))
 
         logger.info('Number of series is {}'.format(len(self.series)))
 
@@ -449,7 +449,8 @@ class OMETiff:
         logger.info('{} -> {}'.format(infile, zarr_file))
         logger.info('converting to zarr format')
         result = subprocess.run([BIOFORMATS2RAW_CMD,
-                        '--resolutions=1', '--file_type=zarr',
+                        '--resolutions=1',
+                                 '--file_type=zarr',
                         '--tile_height=4096', '--tile_width=4096'] +
                        [infile, zarr_file],
                        env=BF_ENV, check=True, capture_output=True, universal_newlines=True)
