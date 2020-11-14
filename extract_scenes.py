@@ -205,7 +205,7 @@ class OMETiff:
             # Now add OMEXML data to the output.  Because OMEXML is unicode encoded, we cannot write this in tifffile.
             set_omexml(outfile, iiif_omexml)
 
-            logger.info('zgenerate_iiif_tiff execution time: {}'.format(time.time() - start_time))
+            logger.info('generate_iiif_tiff execution time: {}'.format(time.time() - start_time))
 
         def iiif_omexml(self, z, channel):
             """
