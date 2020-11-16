@@ -3,6 +3,7 @@ import json
 import logging
 import math
 import os
+import platform
 import re
 import resource
 import sys
@@ -155,13 +156,14 @@ class OMETiff:
             :return:
             """
             start_time = time.time()
-
+            start_usage = resource.getrusage(resource.RUSAGE_SELF)
             outfile = IIIF_FILE.format(file=filename, s=self.Number, z=z_string(z), c=channel_number)
 
             # Compute the number of pyramid levels required so get at 1K pixels at the top of the pyramid.
             resolutions = int(math.log2(max(self.SizeX, self.SizeY)) - 9) if resolutions is None else resolutions
-
-            logger.info(f'generating iiif tiff with {resolutions} levels: z:{z} C:{channel_number}')
+            image_size = self.SizeX*self.SizeY*self.SizeC/(2 **20 if  platform.system() == 'Linux' else 2 ** 30)
+            logger.info(
+                f'generating iiif tiff with {resolutions} levels: z:{z} C:{channel_number} size: {image_size:.2f} GiB')
 
             with TiffWriter(outfile, bigtiff=True) as tiff_out:
                 # Compute resolution (pixels/cm) from physical size per pixel and units.
@@ -204,8 +206,12 @@ class OMETiff:
 
             # Now add OMEXML data to the output.  Because OMEXML is unicode encoded, we cannot write this in tifffile.
             set_omexml(outfile, iiif_omexml)
-
-            logger.info('generate_iiif_tiff execution time: {}'.format(time.time() - start_time))
+            end_usage = resource.getrusage(resource.RUSAGE_SELF)
+            end_rss = end_usage.ru_maxrss / (2 ** 20 if platform.system() == 'Linux' else 2 ** 30)
+            delta_rss = end_rss - (start_usage.ru_maxrss / (2 **20 if  platform.system() == 'Linux' else 2 ** 30))
+            logger.info(
+                f'generate_iiif_tiff execution time: {time.time() - start_time:.2f} rss: {end_rss:.2f} delta rss {delta_rss:.2f}'
+            )
 
         def iiif_omexml(self, z, channel):
             """
@@ -451,7 +457,7 @@ class OMETiff:
                                 env=BF_ENV, check=True, capture_output=True, universal_newlines=True)
         if result.stderr:
             logger.info(result.stderr)
-        logger.info('execution time: {}'.format(time.time() - start_time))
+        logger.info(f'execution time: {time.time() - start_time:.2f}')
 
     @staticmethod
     def map_value(i):
@@ -586,11 +592,11 @@ def main(imagefile, compression='jpeg', tile_size=1024):
     try:
         start_time = time.time()
         seadragon_tiffs(imagefile, compression=compression, tile_size=tile_size)
-        print("--- %s seconds ---" % (time.time() - start_time))
+        print(f"--- {(time.time() - start_time):.2f} seconds ---")
         usage = resource.getrusage(resource.RUSAGE_SELF)
-        print(f"  utime: {usage.ru_utime}")
-        print(f"  stime: {usage.ru_stime}")
-        print(f"  maxrss {usage.ru_maxrss}")
+        print(f"  utime: {usage.ru_utime:.2f}")
+        print(f"  stime: {usage.ru_stime:.2f}")
+        print(f"  maxrss {usage.ru_maxrss/(2 **20 if  platform.system() == 'Linux' else 2 ** 30):.2f}")
         return 0
     except subprocess.CalledProcessError as r:
         print(r.cmd)
