@@ -37,6 +37,7 @@ BF_ENV = dict(os.environ, **{'BF_MAX_MEM': '24g'})
 IIIF_FILE = "{file}-s{s}-z{z}-c{c}.ome.tif"
 Z_OME_FILE = "{file}_S{s}_Z{z}.ome.tif"
 NUMBER_OF_Z_INDEX = None
+NUMBER_OF_CHANNELS = None
 
 
 class OMETiff:
@@ -157,7 +158,7 @@ class OMETiff:
             """
             start_time = time.time()
             start_usage = resource.getrusage(resource.RUSAGE_SELF)
-            outfile = IIIF_FILE.format(file=filename, s=self.Number, z=z_string(z), c=channel_number)
+            outfile = IIIF_FILE.format(file=filename, s=self.Number, z=z_string(z), c=c_string(channel_number))
 
             # Compute the number of pyramid levels required so get at 1K pixels at the top of the pyramid.
             resolutions = int(math.log2(max(self.SizeX, self.SizeY)) - 9) if resolutions is None else resolutions
@@ -395,7 +396,7 @@ class OMETiff:
                                       {'FirstC': str(c), 'FirstT': str(t), 'FirstZ': str(z), 'IFD': "0",
                                        'PlaneCount': "1"}
                                       )
-            tifffile = os.path.basename(IIIF_FILE.format(file=self.filebase, s=image_number, z=z_string(z), c=c))
+            tifffile = os.path.basename(IIIF_FILE.format(file=self.filebase, s=image_number, z=z_string(z), c=c_string(c)))
             uuid_element = ET.SubElement(new_tiffdata, uuid_tag, {'FileName': tifffile})
             uuid_element.text = f"urn:uuid:{self.uuid[(image_number, z, c)]}"
             return new_tiffdata
@@ -524,6 +525,10 @@ def z_string(z):
     z_length = len(str(NUMBER_OF_Z_INDEX))
     return ('0' * z_length + str(z))[-z_length:]
 
+def c_string(c):
+    c_length = len(str(NUMBER_OF_CHANNELS))
+    return ('0' * c_length + str(c))[-c_length:]
+
 
 def seadragon_tiffs(image_path, z_planes=None, delete_ome=False, compression='ZSTD', tile_size=1024):
     """
@@ -539,6 +544,7 @@ def seadragon_tiffs(image_path, z_planes=None, delete_ome=False, compression='ZS
     """
 
     global NUMBER_OF_Z_INDEX
+    global NUMBER_OF_CHANNELS
 
     image_file = os.path.basename(image_path)
     if is_zarr(image_path):
@@ -571,6 +577,8 @@ def seadragon_tiffs(image_path, z_planes=None, delete_ome=False, compression='ZS
         if NUMBER_OF_Z_INDEX == None:
             NUMBER_OF_Z_INDEX = series.SizeZ
         for z in range(series.SizeZ) if z_plane is None else [z_plane]:
+            if NUMBER_OF_CHANNELS == None:
+                NUMBER_OF_CHANNELS = len(series.Channels)
             for channel_number, channel in enumerate(series.Channels):
                 # Get the channel name out of the info we have for the channel, use the ID if there is no name.
                 channel_name = channel.get('Name', channel['ID'])
