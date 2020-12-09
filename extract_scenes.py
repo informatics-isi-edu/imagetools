@@ -258,6 +258,25 @@ class OMETiff:
 
             return ET.ElementTree(subset_omexml)
 
+        def series_omexml(self, z):
+            """
+            Modify OMX XML to represent a single z plane with multiple channels
+            :param z:
+            :return:
+            """
+
+            omexml = self.ometiff.multifile_omexml().getroot()
+
+            # Pick out the image we want....
+            for i, image in enumerate(omexml.findall('.//ome:Image', self.ns)):
+                if i != self.Number:
+                    omexml.remove(image)
+
+            # Update Pixel....
+            pixels = omexml.find('.//ome:Pixels', self.ns)
+            pixels.set('SizeZ', "1")
+            return ET.ElementTree(omexml)
+
         def z_omexml(self, z):
             """
             Modify OMX XML to represent a single z plane with multiple channels
@@ -376,6 +395,9 @@ class OMETiff:
                                       encoding='UTF-8',
                                       method='xml')
         for s in self.series:
+            s.series_omexml(s).write(f'{filename}-s{s.Number}.companion.ome',
+                                encoding='UTF-8',
+                                method='xml')
             for z in range(s.SizeZ):
                 s.z_omexml(z).write(f'{filename}-s{s.Number}-z{z_string(z)}.companion.ome',
                                     encoding='UTF-8',
