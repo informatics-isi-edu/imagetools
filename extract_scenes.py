@@ -187,8 +187,11 @@ class OMETiff:
                     # JPEG compression requires that data be 8 bit, not 16
                     logger.info(f'Converting from uint16 to uint8')
                     image = skimage.util.img_as_ubyte(image)
+                    options.update({'photometric': 'MINISBLACK'})
                     iiif_pixels.set('Type', 'uint8')
+                    iiif_pixels.set('SignificantBits', '8')
                     self.ome_mods['Type'] = 'uint8'  # Keep track of changes made to metadata for later use
+                    self.ome_mods['SignificantBits'] = '8'  # Keep track of changes made to metadata for later use
                 if is_rgb:
                     # Downstream tools will prefer interleaved RGB format, so convert image to that format.
                     logger.info('interleaving RGB....')
@@ -309,7 +312,7 @@ class OMETiff:
 
     def __init__(self, filename):
         self.filename = filename
-        self.filebase = re.sub(r'((\.ome)\.tiff?)?$', '', os.path.basename(filename))
+        self.filebase = re.sub(r'\.zarr$', '', os.path.basename(filename))
         self.uuid = {}
         self.series = []
         self.ns = {'ome': 'http://www.openmicroscopy.org/Schemas/OME/2016-06',
