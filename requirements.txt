@@ -1,7 +1,7 @@
+tifffile==2020.12.8
 matplotlib==3.3.2
 numpy==1.19.2
 imagecodecs==2020.5.30
-pyvips==2.1.12
 scikit_image==0.17.2
 lxml==4.6.1
 skimage==0.0

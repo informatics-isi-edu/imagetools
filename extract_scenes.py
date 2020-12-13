@@ -177,12 +177,15 @@ class OMETiff:
                 if physical_size is not None:
                     options['resolution'] =(round(1 / physical_size[0]), round(1 / physical_size[1]), 'CENTIMETER')
 
-                # Assuming that we are XYCZT ordering, pick out the specified Z plane from the ZARR data assuming T=0.
-                image = self.zarr_series['0'][0, z, :, :, :]
-
                 iiif_omexml = self.iiif_omexml(z, channel_number)  # Get single plane OME-XML
                 iiif_pixels = iiif_omexml.getroot().find('.//ome:Pixels', self.ns)
                 is_rgb = iiif_pixels.find('./ome:Channel', self.ns).attrib['SamplesPerPixel'] == '3'
+                # Assuming that we are XYCZT ordering, pick out the specified Z plane from the ZARR data assuming T=0.
+                if is_rgb:
+                    image = self.zarr_series['0'][0, z, :, :, :]
+                else:
+                    image = self.zarr_series['0'][0, z, channel_number, :, :]
+
                 if compression == 'jpeg' and self.Type == 'uint16':
                     # JPEG compression requires that data be 8 bit, not 16
                     logger.info(f'Converting from uint16 to uint8')
@@ -200,7 +203,7 @@ class OMETiff:
                     iiif_pixels.attrib['Interleaved'] = "true"
                     self.ome_mods['Interleaved'] = 'true'  # Keep track of changes made to metadata for later use
 
-                logger.info(f'writing base image....')
+                logger.info(f'writing base image....{image.shape}')
                 # Write out image data, and layers of pyramid. Layers are produced by just subsampling image, which
                 # is consistent with what is done in bioformats libary.
                 tiff_out.save(image, **options)
@@ -255,16 +258,15 @@ class OMETiff:
                 if i != channel:
                     pixels.remove(channel_element)
 
-            # Remove other plane element to reflect that we have a single plane.
-            for i, plane_element in enumerate(pixels.findall('.//ome:Plane', self.ns)):
-                if int(plane_element.attrib['TheC']) != channel or int(plane_element.attrib['TheZ']) != z:
-                    pixels.remove(plane_element)
+            for plane in pixels.findall('.//ome:Plane', self.ns):
+                if (int(plane.get('TheZ')) != z) or (int(plane.get('TheC')) != channel):
+                    pixels.remove(plane)
 
             return ET.ElementTree(subset_omexml)
 
         def series_omexml(self, z):
             """
-            Modify OMX XML to represent a single z plane with multiple channels
+            Modify OMX XML to represent a single series with multiple channels
             :param z:
             :return:
             """
@@ -275,10 +277,6 @@ class OMETiff:
             for i, image in enumerate(omexml.findall('.//ome:Image', self.ns)):
                 if i != self.Number:
                     omexml.remove(image)
-
-            # Update Pixel....
-            pixels = omexml.find('.//ome:Pixels', self.ns)
-            pixels.set('SizeZ', "1")
             return ET.ElementTree(omexml)
 
         def z_omexml(self, z):
@@ -300,9 +298,19 @@ class OMETiff:
             pixels.set('SizeZ', "1")
 
             # Get rid of other tiffdata elements...
+            ifd = 0
             for tiffdata in pixels.findall('.//ome:TiffData', self.ns):
                 if int(tiffdata.get('FirstZ')) != z:
                     pixels.remove(tiffdata)
+                else:
+                    # Adjust IFD attribute in tiffdata to start counting at 0.
+                    tiffdata.set('IFD', str(ifd))
+                    tiffdata.set('FirstZ', '0')
+                    ifd += int(tiffdata.attrib['PlaneCount'])
+
+            for plane in pixels.findall('.//ome:Plane', self.ns):
+                if int(plane.get('TheZ')) != z:
+                    pixels.remove(plane)
 
             return ET.ElementTree(omexml)
 
@@ -414,11 +422,11 @@ class OMETiff:
         :return:
         """
 
-        def generate_tiffdata(c, z, t=0):
+        def generate_tiffdata(ifd, c, z, t=0):
             tiffdata_tag = "{http://www.openmicroscopy.org/Schemas/OME/2016-06}TiffData"
             uuid_tag = "{http://www.openmicroscopy.org/Schemas/OME/2016-06}UUID"
             new_tiffdata = ET.Element(tiffdata_tag,
-                                      {'FirstC': str(c), 'FirstT': str(t), 'FirstZ': str(z), 'IFD': "0",
+                                      {'FirstC': str(c), 'FirstT': str(t), 'FirstZ': str(z), 'IFD': str(ifd),
                                        'PlaneCount': "1"}
                                       )
             tifffile = os.path.basename(IIIF_FILE.format(file=self.filebase, s=image_number, z=z_string(z), c=c_string(c)))
@@ -439,16 +447,16 @@ class OMETiff:
             planes = pixels.findall('ome:Plane', self.ns)
 
             if len(planes) == 0:
-                pixels.append(generate_tiffdata(0, 0, 0))
+                pixels.append(generate_tiffdata(0, 0, 0, 0))
             else:
                 plane_index = list(pixels).index(planes[0])  # Get index of the first plane.
-                for plane in planes:
+                for ifd, plane in enumerate(planes):
                     # Generate a new TIFFData element for each plane in the image.  Format is:
                     # <TiffData><UUID>uuid</UUID></TIFFData>
                     z = int(plane.get('TheZ', default='0'))
                     c = int(plane.get('TheC', default='0'))
                     t = int(plane.get('TheT', default='0'))
-                    pixels.insert(plane_index, generate_tiffdata(c, z, t))
+                    pixels.insert(plane_index, generate_tiffdata(ifd, c, z, t))
                     plane_index += 1
 
         return ET.ElementTree(multifile_omexml)
