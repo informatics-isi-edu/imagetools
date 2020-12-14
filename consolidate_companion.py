@@ -39,6 +39,7 @@ def consolidate_companion(companion_file):
     # Remover UUID elements
     for tiffdata in omexml.findall('.//ome:TiffData', ns):
         tiffdata.remove(tiffdata.find('.//ome:UUID', ns))
+        del tiffdata.attrib["IFD"]
     set_omexml(ome_filename, omexml)
 
 if __name__ == '__main__':

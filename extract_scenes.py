@@ -298,15 +298,11 @@ class OMETiff:
             pixels.set('SizeZ', "1")
 
             # Get rid of other tiffdata elements...
-            ifd = 0
             for tiffdata in pixels.findall('.//ome:TiffData', self.ns):
                 if int(tiffdata.get('FirstZ')) != z:
                     pixels.remove(tiffdata)
                 else:
-                    # Adjust IFD attribute in tiffdata to start counting at 0.
-                    tiffdata.set('IFD', str(ifd))
                     tiffdata.set('FirstZ', '0')
-                    ifd += int(tiffdata.attrib['PlaneCount'])
 
             for plane in pixels.findall('.//ome:Plane', self.ns):
                 if int(plane.get('TheZ')) != z:
@@ -422,11 +418,11 @@ class OMETiff:
         :return:
         """
 
-        def generate_tiffdata(ifd, c, z, t=0):
+        def generate_tiffdata(c, z, t=0):
             tiffdata_tag = "{http://www.openmicroscopy.org/Schemas/OME/2016-06}TiffData"
             uuid_tag = "{http://www.openmicroscopy.org/Schemas/OME/2016-06}UUID"
             new_tiffdata = ET.Element(tiffdata_tag,
-                                      {'FirstC': str(c), 'FirstT': str(t), 'FirstZ': str(z), 'IFD': str(ifd),
+                                      {'FirstC': str(c), 'FirstT': str(t), 'FirstZ': str(z), 'IFD': '0',
                                        'PlaneCount': "1"}
                                       )
             tifffile = os.path.basename(IIIF_FILE.format(file=self.filebase, s=image_number, z=z_string(z), c=c_string(c)))
@@ -447,16 +443,16 @@ class OMETiff:
             planes = pixels.findall('ome:Plane', self.ns)
 
             if len(planes) == 0:
-                pixels.append(generate_tiffdata(0, 0, 0, 0))
+                pixels.append(generate_tiffdata(0, 0, 0))
             else:
                 plane_index = list(pixels).index(planes[0])  # Get index of the first plane.
-                for ifd, plane in enumerate(planes):
+                for plane in planes:
                     # Generate a new TIFFData element for each plane in the image.  Format is:
                     # <TiffData><UUID>uuid</UUID></TIFFData>
                     z = int(plane.get('TheZ', default='0'))
                     c = int(plane.get('TheC', default='0'))
                     t = int(plane.get('TheT', default='0'))
-                    pixels.insert(plane_index, generate_tiffdata(ifd, c, z, t))
+                    pixels.insert(plane_index, generate_tiffdata(c, z, t))
                     plane_index += 1
 
         return ET.ElementTree(multifile_omexml)
