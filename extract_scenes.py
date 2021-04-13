@@ -28,7 +28,6 @@ logger.setLevel(logging.INFO)
 BFCONVERT_CMD = '/usr/local/bin/bftools/bfconvert'
 TIFFCOMMENT_CMD = '/usr/local/bin/bftools/tiffcomment'
 BIOFORMATS2RAW_CMD = '/usr/local/bin/bioformats2raw'
-RAW2OMETIFF_CMD = '/usr/local/bin/raw2ometiff'
 
 # Make sure we have enough memory to run bfconvert on big files
 BF_ENV = dict(os.environ, **{'BF_MAX_MEM': '24g'})
@@ -323,7 +322,7 @@ class OMETiff:
                    'xsi': "http://www.w3.org/2001/XMLSchema-instance"}
 
         logger.info("Getting {} metadata....".format(filename))
-        self.zarr_data = zarr.open(filename + '/data.zarr', 'r')
+        self.zarr_data = zarr.open(filename, 'r')
         self.omexml = ET.parse(f"{filename}/METADATA.ome.xml")
 
         for pixels in self.omexml.findall('.//ome:Pixels', self.ns):
@@ -481,7 +480,7 @@ class OMETiff:
         logger.info('{} -> {}'.format(infile, zarr_file))
         logger.info('converting to zarr format')
         result = subprocess.run([BIOFORMATS2RAW_CMD,
-                                 '--resolutions=1', '--file_type=zarr',
+                                 '--resolutions=1',
                                  '--tile_height=4096', '--tile_width=4096'] +
                                 [infile, zarr_file],
                                 env=BF_ENV, check=True, capture_output=True, universal_newlines=True)
@@ -515,7 +514,7 @@ def is_ome_tiff(filename):
 
 
 def is_zarr(filename):
-    return os.path.exists(f"{filename}/METADATA.ome.xml") and os.path.exists(f"{filename}/data.zarr")
+    return os.path.exists(f"{filename}/METADATA.ome.xml") and os.path.exists(f"{filename}")
 
 
 def get_omexml(file):
@@ -642,4 +641,6 @@ def main(imagefile, compression='jpeg', tile_size=1024):
 
 
 if __name__ == '__main__':
+    if len(sys.argv) == 3:
+        OMETiff.OMETiffSeries.JPEG_QUALITY = int(sys.argv[2])
     sys.exit(main(sys.argv[1]))
