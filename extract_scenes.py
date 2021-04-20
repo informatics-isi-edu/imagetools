@@ -15,7 +15,7 @@ import numpy as np
 
 import xml.etree.ElementTree as ET
 import zarr
-import skimage
+import skimage, skimage.exposure
 from tifffile import TiffFile, TiffWriter
 
 TMPDIR = None
@@ -28,7 +28,6 @@ logger.setLevel(logging.INFO)
 BFCONVERT_CMD = '/usr/local/bin/bftools/bfconvert'
 TIFFCOMMENT_CMD = '/usr/local/bin/bftools/tiffcomment'
 BIOFORMATS2RAW_CMD = '/usr/local/bin/bioformats2raw'
-RAW2OMETIFF_CMD = '/usr/local/bin/raw2ometiff'
 
 # Make sure we have enough memory to run bfconvert on big files
 BF_ENV = dict(os.environ, **{'BF_MAX_MEM': '24g'})
@@ -179,9 +178,10 @@ class OMETiff:
 
                 iiif_omexml = self.iiif_omexml(z, channel_number)  # Get single plane OME-XML
                 iiif_pixels = iiif_omexml.getroot().find('.//ome:Pixels', self.ns)
-                is_rgb = iiif_pixels.find('./ome:Channel', self.ns).attrib['SamplesPerPixel'] == '3'
+
                 # Assuming that we are XYCZT ordering, pick out the specified Z plane from the ZARR data assuming T=0.
-                if is_rgb:
+                if self.RGB or self.Thumbnail:
+                    print("got rbg...")
                     image = self.zarr_series['0'][0, z, :, :, :]
                 else:
                     image = self.zarr_series['0'][0, z, channel_number, :, :]
@@ -195,13 +195,21 @@ class OMETiff:
                     iiif_pixels.set('SignificantBits', '8')
                     self.ome_mods['Type'] = 'uint8'  # Keep track of changes made to metadata for later use
                     self.ome_mods['SignificantBits'] = '8'  # Keep track of changes made to metadata for later use
-                if is_rgb:
+                    histogram = skimage.exposure.histogram(image, nbins=256)[0]
+                    histogram = np.histogram(image, bins=256)[0]
+                    print(image.shape)
+                    self.Channels[channel_number]['Intensity_Histogram'] = histogram.tolist()
+                if self.RGB:
                     # Downstream tools will prefer interleaved RGB format, so convert image to that format.
                     logger.info('interleaving RGB....')
                     image = np.moveaxis(image, 0, -1)  # Interleaved image has to have C as last dimension.
                     options.update({'photometric': 'RGB', 'planarconfig': 'CONTIG'})
                     iiif_pixels.attrib['Interleaved'] = "true"
                     self.ome_mods['Interleaved'] = 'true'  # Keep track of changes made to metadata for later use
+                    value_image = skimage.rgb2hsv(image)[:, :, 2]
+                    histogram = skimage.exposure.histogram(value_image, nbins=256)[0]
+                    print(histogram.shape)
+                    self.Channels[channel_number]['Intensity_Histogram'], _  = histogram.tolist()
 
                 logger.info(f'writing base image....{image.shape}')
                 # Write out image data, and layers of pyramid. Layers are produced by just subsampling image, which
@@ -323,8 +331,8 @@ class OMETiff:
                    'xsi': "http://www.w3.org/2001/XMLSchema-instance"}
 
         logger.info("Getting {} metadata....".format(filename))
-        self.zarr_data = zarr.open(filename + '/data.zarr', 'r')
-        self.omexml = ET.parse(f"{filename}/METADATA.ome.xml")
+        self.zarr_data = zarr.open(filename, 'r')
+        self.omexml = ET.parse(f"{filename}/OME/METADATA.ome.xml")
 
         for pixels in self.omexml.findall('.//ome:Pixels', self.ns):
             for e in pixels.findall('.//ome:MetadataOnly', self.ns):
@@ -481,7 +489,7 @@ class OMETiff:
         logger.info('{} -> {}'.format(infile, zarr_file))
         logger.info('converting to zarr format')
         result = subprocess.run([BIOFORMATS2RAW_CMD,
-                                 '--resolutions=1', '--file_type=zarr',
+                                 '--resolutions=1',
                                  '--tile_height=4096', '--tile_width=4096'] +
                                 [infile, zarr_file],
                                 env=BF_ENV, check=True, capture_output=True, universal_newlines=True)
@@ -515,7 +523,7 @@ def is_ome_tiff(filename):
 
 
 def is_zarr(filename):
-    return os.path.exists(f"{filename}/METADATA.ome.xml") and os.path.exists(f"{filename}/data.zarr")
+    return os.path.exists(f"{filename}/OME/METADATA.ome.xml") and os.path.exists(f"{filename}")
 
 
 def get_omexml(file):
@@ -642,4 +650,6 @@ def main(imagefile, compression='jpeg', tile_size=1024):
 
 
 if __name__ == '__main__':
+    if len(sys.argv) == 3:
+        OMETiff.OMETiffSeries.JPEG_QUALITY = int(sys.argv[2])
     sys.exit(main(sys.argv[1]))
