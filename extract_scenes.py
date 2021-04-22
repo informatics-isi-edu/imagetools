@@ -70,11 +70,33 @@ class OMETiff:
             self.ome_mods = {}
             self.Interleaved = False
             self.Thumbnail = True if (self.Name == 'label image' or self.Name == 'macro image') else False
-            self.RGB = self.Pixels.find('./ome:Channel', self.ns).attrib['SamplesPerPixel'] == '3'
 
+            # Try to figure out if the image is RGB or not.  This is complicated because the bioformats to RAW splits
+            # an RGB image into three seperate channels.
+            channels = self.Pixels.findall('./ome:Channel', self.ns)
+            if self.SizeC != 3:  # Have to have 3 channels to be RGB
+                self.RGB = False
+            elif channels[0].attrib['SamplesPerPixel'] == '3':
+                self.RGB = True  # 3 channels and three samples per channel, so we have RGB
+            else:
+                # The following heuristic is used to see if something is RGB.heck the channel names, to see if they are all the same, and if there is a single plane....
+                #   1) Thumbnails are assumed to be RGB
+                #   2) Every channel has the same channel name and fluor
+                #   3) there is only a single plane.
+                if (self.Thumbnail or
+                        (channels[0].attrib['Fluor'] == channels[1].attrib['Fluor'] and
+                         channels[0].attrib['Fluor'] == channels[2].attrib['Fluor'] and
+                         channels[0].attrib['Name'] == channels[1].attrib['Name'] and
+                         channels[0].attrib['Name'] == channels[2].attrib['Name'] and
+                         len(self.Pixels.findall('./ome:Plane', self.ns)))):
+                    self.RGB = True
             # Create a dictionary of values in Channels to simplify usage
             self.Channels = [{**{k: OMETiff.map_value(v) for k, v in c.attrib.items()}, **{'RGB': self.RGB}}
-                             for c in self.Pixels.findall('./ome:Channel', self.ns)]
+                             for c in channels]
+            # If we have RGB, make sure that we have only one channel listed.  bioformats2raw splits them up....
+            if self.RGB:
+                self.Channels = self.Channels[0:1]
+                self.Channels[0]["SamplesPerPixel"] = 3
 
         @property
         def Name(self):
@@ -161,7 +183,7 @@ class OMETiff:
 
             # Compute the number of pyramid levels required so get at 1K pixels at the top of the pyramid.
             resolutions = int(math.log2(max(self.SizeX, self.SizeY)) - 9) if resolutions is None else resolutions
-            image_size = self.SizeX*self.SizeY*self.SizeC/(2 **20 if  platform.system() == 'Linux' else 2 ** 30)
+            image_size = self.SizeX * self.SizeY * self.SizeC / (2 ** 20 if platform.system() == 'Linux' else 2 ** 30)
             logger.info(
                 f'generating iiif tiff with {resolutions} levels: z:{z} C:{channel_number} size: {image_size:.2f} GiB')
 
@@ -172,20 +194,19 @@ class OMETiff:
                                compress=('jpeg', self.JPEG_QUALITY) if compression.lower() == 'jpeg' else compression,
                                description=f"Single image plane from {filename}",
                                metadata=None)
-                physical_size  = self.PhysicalSize
+                physical_size = self.PhysicalSize
                 if physical_size is not None:
-                    options['resolution'] =(round(1 / physical_size[0]), round(1 / physical_size[1]), 'CENTIMETER')
+                    options['resolution'] = (round(1 / physical_size[0]), round(1 / physical_size[1]), 'CENTIMETER')
 
                 iiif_omexml = self.iiif_omexml(z, channel_number)  # Get single plane OME-XML
                 iiif_pixels = iiif_omexml.getroot().find('.//ome:Pixels', self.ns)
 
-                # Assuming that we are XYCZT ordering, pick out the specified Z plane from the ZARR data assuming T=0.
+                # Default Zarr ordering ix TCZYX, so pick out the specified Z plane from the ZARR data assuming T=0.
+                # Get the core array for the group, which is named '0'
                 if self.RGB or self.Thumbnail:
-                    print("got rbg...")
-                    image = self.zarr_series['0'][0, z, :, :, :]
+                    image = self.zarr_series['0'][0, :, z, :, :]
                 else:
-                    image = self.zarr_series['0'][0, z, channel_number, :, :]
-
+                    image = self.zarr_series['0'][0, channel_number, z, :, :]
                 if compression == 'jpeg' and self.Type == 'uint16':
                     # JPEG compression requires that data be 8 bit, not 16
                     logger.info(f'Converting from uint16 to uint8')
@@ -195,21 +216,19 @@ class OMETiff:
                     iiif_pixels.set('SignificantBits', '8')
                     self.ome_mods['Type'] = 'uint8'  # Keep track of changes made to metadata for later use
                     self.ome_mods['SignificantBits'] = '8'  # Keep track of changes made to metadata for later use
-                    histogram = skimage.exposure.histogram(image, nbins=256)[0]
-                    histogram = np.histogram(image, bins=256)[0]
-                    print(image.shape)
+                    histogram = skimage.exposure.histogram(image)[0]
                     self.Channels[channel_number]['Intensity_Histogram'] = histogram.tolist()
                 if self.RGB:
                     # Downstream tools will prefer interleaved RGB format, so convert image to that format.
-                    logger.info('interleaving RGB....')
+                    logger.info(f'interleaving RGB....{image.shape}')
                     image = np.moveaxis(image, 0, -1)  # Interleaved image has to have C as last dimension.
                     options.update({'photometric': 'RGB', 'planarconfig': 'CONTIG'})
                     iiif_pixels.attrib['Interleaved'] = "true"
                     self.ome_mods['Interleaved'] = 'true'  # Keep track of changes made to metadata for later use
-                    value_image = skimage.rgb2hsv(image)[:, :, 2]
-                    histogram = skimage.exposure.histogram(value_image, nbins=256)[0]
-                    print(histogram.shape)
-                    self.Channels[channel_number]['Intensity_Histogram'], _  = histogram.tolist()
+                    if not self.Thumbnail:
+                        value_image = skimage.color.rgb2hsv(image)[:, :, 2]
+                        histogram = skimage.exposure.histogram(value_image, nbins=256)[0]
+                        self.Channels[channel_number]['Intensity_Histogram'] = histogram.tolist()
 
                 logger.info(f'writing base image....{image.shape}')
                 # Write out image data, and layers of pyramid. Layers are produced by just subsampling image, which
@@ -223,7 +242,7 @@ class OMETiff:
             set_omexml(outfile, iiif_omexml)
             end_usage = resource.getrusage(resource.RUSAGE_SELF)
             end_rss = end_usage.ru_maxrss / (2 ** 20 if platform.system() == 'Linux' else 2 ** 30)
-            delta_rss = end_rss - (start_usage.ru_maxrss / (2 **20 if  platform.system() == 'Linux' else 2 ** 30))
+            delta_rss = end_rss - (start_usage.ru_maxrss / (2 ** 20 if platform.system() == 'Linux' else 2 ** 30))
             logger.info(
                 f'generate_iiif_tiff execution time: {time.time() - start_time:.2f} rss: {end_rss:.2f} delta rss {delta_rss:.2f}'
             )
@@ -389,7 +408,7 @@ class OMETiff:
 
             # Now add in the details about the channels, convert integer version of Color to list of RGB.
             i['Channels'] = [{k: convert_rgba(v) if k == 'Color' else v for k, v in c.items()} for c in s.Channels]
-            i['Planes'] = [{k: self.map_value(v)  for k, v in c.items()} for c in s.Planes]
+            i['Planes'] = [{k: self.map_value(v) for k, v in c.items()} for c in s.Planes]
             i['Resolutions'] = s.Resolutions
             i['RGB'] = s.RGB
             i['Interleaved'] = s.Interleaved
@@ -412,8 +431,8 @@ class OMETiff:
                                       method='xml')
         for s in self.series:
             s.series_omexml(s).write(f'{filename}-s{s.Number}.companion.ome',
-                                encoding='UTF-8',
-                                method='xml')
+                                     encoding='UTF-8',
+                                     method='xml')
             for z in range(s.SizeZ):
                 s.z_omexml(z).write(f'{filename}-s{s.Number}-z{z_string(z)}.companion.ome',
                                     encoding='UTF-8',
@@ -433,7 +452,8 @@ class OMETiff:
                                       {'FirstC': str(c), 'FirstT': str(t), 'FirstZ': str(z), 'IFD': '0',
                                        'PlaneCount': "1"}
                                       )
-            tifffile = os.path.basename(IIIF_FILE.format(file=self.filebase, s=image_number, z=z_string(z), c=c_string(c)))
+            tifffile = os.path.basename(
+                IIIF_FILE.format(file=self.filebase, s=image_number, z=z_string(z), c=c_string(c)))
             uuid_element = ET.SubElement(new_tiffdata, uuid_tag, {'FileName': tifffile})
             uuid_element.text = f"urn:uuid:{self.uuid[(image_number, z, c)]}"
             return new_tiffdata
@@ -489,6 +509,7 @@ class OMETiff:
         logger.info('{} -> {}'.format(infile, zarr_file))
         logger.info('converting to zarr format')
         result = subprocess.run([BIOFORMATS2RAW_CMD,
+                                 '--overwrite',
                                  '--resolutions=1',
                                  '--tile_height=4096', '--tile_width=4096'] +
                                 [infile, zarr_file],
@@ -561,6 +582,7 @@ def set_omexml(file, omexml):
 def z_string(z):
     z_length = len(str(NUMBER_OF_Z_INDEX))
     return ('0' * z_length + str(z))[-z_length:]
+
 
 def c_string(c):
     c_length = len(str(NUMBER_OF_CHANNELS))
@@ -641,7 +663,7 @@ def main(imagefile, compression='jpeg', tile_size=1024):
         usage = resource.getrusage(resource.RUSAGE_SELF)
         print(f"  utime: {usage.ru_utime:.2f}")
         print(f"  stime: {usage.ru_stime:.2f}")
-        print(f"  maxrss {usage.ru_maxrss/(2 **20 if  platform.system() == 'Linux' else 2 ** 30):.2f}")
+        print(f"  maxrss {usage.ru_maxrss / (2 ** 20 if platform.system() == 'Linux' else 2 ** 30):.2f}")
         return 0
     except subprocess.CalledProcessError as r:
         print(r.cmd)
