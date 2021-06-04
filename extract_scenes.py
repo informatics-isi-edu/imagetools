@@ -26,6 +26,7 @@ logging.basicConfig(format=FORMAT)
 logger.setLevel(logging.INFO)
 
 BFCONVERT_CMD = '/usr/local/bin/bftools/bfconvert'
+SHOWINF_CMD = '/usr/local/bin/bftools/showinf'
 TIFFCOMMENT_CMD = '/usr/local/bin/bftools/tiffcomment'
 BIOFORMATS2RAW_CMD = '/usr/local/bin/bioformats2raw'
 
@@ -70,33 +71,16 @@ class OMETiff:
             self.ome_mods = {}
             self.Interleaved = False
             self.Thumbnail = True if (self.Name == 'label image' or self.Name == 'macro image') else False
-
-            # Try to figure out if the image is RGB or not.  This is complicated because the bioformats to RAW splits
-            # an RGB image into three seperate channels.
             channels = self.Pixels.findall('./ome:Channel', self.ns)
-            if self.SizeC != 3:  # Have to have 3 channels to be RGB
-                self.RGB = False
-            elif channels[0].attrib['SamplesPerPixel'] == '3':
-                self.RGB = True  # 3 channels and three samples per channel, so we have RGB
+
+            if self.Thumbnail or (self.SizeC == 3 and channels[0].attrib['SamplesPerPixel'] == '3'):  # Have to have 3 channels to be RGB
+                self.RGB = True
             else:
-                # The following heuristic is used to see if something is RGB.heck the channel names, to see if they are all the same, and if there is a single plane....
-                #   1) Thumbnails are assumed to be RGB
-                #   2) Every channel has the same channel name and fluor
-                #   3) there is only a single plane.
-                if (self.Thumbnail or
-                        (channels[0].attrib['Fluor'] == channels[1].attrib['Fluor'] and
-                         channels[0].attrib['Fluor'] == channels[2].attrib['Fluor'] and
-                         channels[0].attrib['Name'] == channels[1].attrib['Name'] and
-                         channels[0].attrib['Name'] == channels[2].attrib['Name'] and
-                         len(self.Pixels.findall('./ome:Plane', self.ns)))):
-                    self.RGB = True
+                self.RGB = False
+
             # Create a dictionary of values in Channels to simplify usage
             self.Channels = [{**{k: OMETiff.map_value(v) for k, v in c.attrib.items()}, **{'RGB': self.RGB}}
                              for c in channels]
-            # If we have RGB, make sure that we have only one channel listed.  bioformats2raw splits them up....
-            if self.RGB:
-                self.Channels = self.Channels[0:1]
-                self.Channels[0]["SamplesPerPixel"] = 3
 
         @property
         def Name(self):
@@ -210,13 +194,14 @@ class OMETiff:
                 if compression == 'jpeg' and self.Type == 'uint16':
                     # JPEG compression requires that data be 8 bit, not 16
                     logger.info(f'Converting from uint16 to uint8')
+                    histogram, bins = skimage.exposure.histogram(image)
                     image = skimage.util.img_as_ubyte(image)
                     options.update({'photometric': 'MINISBLACK'})
                     iiif_pixels.set('Type', 'uint8')
                     iiif_pixels.set('SignificantBits', '8')
                     self.ome_mods['Type'] = 'uint8'  # Keep track of changes made to metadata for later use
                     self.ome_mods['SignificantBits'] = '8'  # Keep track of changes made to metadata for later use
-                    histogram = skimage.exposure.histogram(image)[0]
+                    histogram, bins = skimage.exposure.histogram(image)
                     self.Channels[channel_number]['Intensity_Histogram'] = histogram.tolist()
                 if self.RGB:
                     # Downstream tools will prefer interleaved RGB format, so convert image to that format.
@@ -350,8 +335,9 @@ class OMETiff:
                    'xsi': "http://www.w3.org/2001/XMLSchema-instance"}
 
         logger.info("Getting {} metadata....".format(filename))
-        self.zarr_data = zarr.open(filename, 'r')
-        self.omexml = ET.parse(f"{filename}/OME/METADATA.ome.xml")
+        self.zarr_data = zarr.open(zarr.NestedDirectoryStore(filename), 'r')
+        #self.omexml = ET.parse(f"{filename}/OME/METADATA.ome.xml")
+        self.omexml = ET.parse(f"{os.path.dirname(filename)}/SOURCEMETADATA.ome.xml")
 
         for pixels in self.omexml.findall('.//ome:Pixels', self.ns):
             for e in pixels.findall('.//ome:MetadataOnly', self.ns):
@@ -486,15 +472,24 @@ class OMETiff:
         return ET.ElementTree(multifile_omexml)
 
     @staticmethod
-    def is_rgb(omexml):
-        ns = {'ome': 'http://www.openmicroscopy.org/Schemas/OME/2016-06'}
+    def source_metadata(infile):
+        """
+        Use showinf to get bioformats interpretation of source metadata.
+        :param infile:
+        :return:
+        """
 
-        rgb = False
-        # Look for  images with three samples per channels....
-        return False if omexml.find(".//ome:Channel[@SamplesPerPixel='3']", ns) is None else True
+        start_time = time.time()
+        logger.info('getting bioformats metadata....')
+        result = subprocess.run([SHOWINF_CMD, '-nopix','-noflat', '-omexml-only', '-no-sas', infile],
+                                env=BF_ENV, check=True, capture_output=True, universal_newlines=True)
+        if result.stderr:
+            logger.info(result.stderr)
+        logger.info(f'execution time: {time.time() - start_time:.2f}')
+        return result.stdout
 
     @staticmethod
-    def generate_zarr_file(infile, zarr_file):
+    def generate_zarr_file(infile, outdir):
         """
         Use bioformats2raw and raw2ometiff to generate an OME tiff version of infile.  To make things simple downstream,
         only include one level of pyramid in this file.
@@ -503,8 +498,10 @@ class OMETiff:
         :return:
         """
 
+
         start_time = time.time()
         filename, _ext = os.path.splitext(os.path.basename(infile))
+        zarr_file = f"{outdir}/{filename}.zarr"
 
         logger.info('{} -> {}'.format(infile, zarr_file))
         logger.info('converting to zarr format')
@@ -517,6 +514,9 @@ class OMETiff:
         if result.stderr:
             logger.info(result.stderr)
         logger.info(f'execution time: {time.time() - start_time:.2f}')
+        with open(f'{outdir}/SOURCEMETADATA.ome.xml','w') as metadata:
+            metadata.write(OMETiff.source_metadata(infile))
+        return zarr_file
 
     @staticmethod
     def map_value(i):
@@ -549,7 +549,7 @@ def is_zarr(filename):
 
 def get_omexml(file):
     """
-    Get the omexml metadata froma file.
+    Get the omexml metadata from a file.
     """
     result = subprocess.run(
         [TIFFCOMMENT_CMD, file],
@@ -611,8 +611,8 @@ def seadragon_tiffs(image_path, z_planes=None, delete_ome=False, compression='ZS
         zarr_file = image_path
     else:
         filename, _ext = os.path.splitext(image_file)
-        zarr_file = f"{filename}/{filename}.zarr"
-        OMETiff.generate_zarr_file(image_path, zarr_file)
+        outdir = f"{filename}"
+        zarr_file = OMETiff.generate_zarr_file(image_path, outdir)
 
     try:
         os.mkdir(filename)
@@ -642,9 +642,7 @@ def seadragon_tiffs(image_path, z_planes=None, delete_ome=False, compression='ZS
                 # Get the channel name out of the info we have for the channel, use the ID if there is no name.
                 channel_name = channel.get('Name', channel['ID'])
                 channel_name = channel_name.replace(" ", "_")
-                logger.info('Converting scene {} {} {} to compressed TIFF'.format(series.Number,
-                                                                                  channel_name,
-                                                                                  z))
+                logger.info(f'Converting scene series:{series.Number} rgb:{series.RGB} name: {channel_name} z:{z} to compressed TIFF')
                 # Generate a iiif file for the page that corresponds to this channel.
                 series.generate_iiif_tiff(filename,
                                           z=z, channel_number=channel_number,
