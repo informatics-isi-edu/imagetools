@@ -342,7 +342,8 @@ class OMETiff:
             tiff_data = pixels.findall('.//ome:TiffData', self.ns)
             if len(tiff_data) > 1:
                 raise OMETiff.ConversionError("More than one TiffData element")
-            pixels.remove(tiff_data[0])
+            elif len(tiff_data) == 1:
+                pixels.remove(tiff_data[0])
 
         ET.register_namespace('', self.ns['ome'])
         for k, v in self.ns.items():
