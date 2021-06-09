@@ -253,9 +253,6 @@ class OMETiff:
             pixels.set('SizeC', "3" if self.RGB else "1")
             pixels.set('SizeZ', "1")
 
-            if pixels.find('.//ome:TiffData', self.ns) is not None:
-                raise OMETiff.ConversionError("More than one TiffData element")
-
             tiffdata_tag = "{http://www.openmicroscopy.org/Schemas/OME/2016-06}TiffData"
             tiffdata = ET.Element(tiffdata_tag,
                                   attrib={"IFD": "0", "PlaneCount": "1", "FirstC": str(channel), "FirstZ": str(z)})
@@ -297,7 +294,6 @@ class OMETiff:
             :param z:
             :return:
             """
-
             omexml = self.ometiff.multifile_omexml().getroot()
 
             # Pick out the image we want....
@@ -342,6 +338,11 @@ class OMETiff:
         for pixels in self.omexml.findall('.//ome:Pixels', self.ns):
             for e in pixels.findall('.//ome:MetadataOnly', self.ns):
                 pixels.remove(e)
+            # If source file was OME-TIFF, it may have a tiffdata element in the metadata.  We can get rid of this
+            tiff_data = pixels.findall('.//ome:TiffData', self.ns)
+            if len(tiff_data) > 1:
+                raise OMETiff.ConversionError("More than one TiffData element")
+            pixels.remove(tiff_data[0])
 
         ET.register_namespace('', self.ns['ome'])
         for k, v in self.ns.items():
@@ -448,8 +449,6 @@ class OMETiff:
 
         for image_number, image in enumerate(multifile_omexml.findall('.//ome:Image', self.ns)):
             pixels = image.find('.//ome:Pixels', self.ns)
-            if len(pixels.findall('.//ome:TiffData', self.ns)) > 1:
-                raise OMETiff.ConversionError("More than one TiffData element")
 
             # Update OME with any changes that had to be made when generating IIIF version of image.
             for k, v in self.series[image_number].ome_mods.items():
