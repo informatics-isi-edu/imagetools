@@ -51,10 +51,10 @@ class OMETiff:
         """
         JPEG_QUALITY = 80
 
-        def __init__(self, ometiff, series_number, series):
+        def __init__(self, ometiff, series_number, series, force_rgb=False):
             """
             Sometimes the value of RGB and Interleaved in the metadata doesn't match up with what is actually in the
-            image. This constructure has abilityto patch up these errors.
+            image. This constructur has ability to patch up these errors.
 
             :param ometiff: Reference to OMETiff instance the contains this series
             :param series_number: Number of this series, integeter.
@@ -73,7 +73,9 @@ class OMETiff:
             self.Thumbnail = True if (self.Name == 'label image' or self.Name == 'macro image') else False
             channels = self.Pixels.findall('./ome:Channel', self.ns)
 
-            if self.Thumbnail or (self.SizeC == 3 and channels[0].attrib['SamplesPerPixel'] == '3'):  # Have to have 3 channels to be RGB
+            if (self.Thumbnail or
+                    (self.SizeC == 3 and channels[0].attrib['SamplesPerPixel'] == '3') or
+                    (self.SizeC ==3 and force_rgb)):  # Have to have 3 channels to be RGB
                 self.RGB = True
             else:
                 self.RGB = False
@@ -322,7 +324,7 @@ class OMETiff:
         def __init__(self, msg):
             self.msg = msg
 
-    def __init__(self, filename):
+    def __init__(self, filename, force_rgb=False):
         self.filename = filename
         self.filebase = re.sub(r'\.zarr$', '', os.path.basename(filename))
         self.uuid = {}
@@ -340,17 +342,15 @@ class OMETiff:
                 pixels.remove(e)
             # If source file was OME-TIFF, it may have a tiffdata element in the metadata.  We can get rid of this
             tiff_data = pixels.findall('.//ome:TiffData', self.ns)
-            if len(tiff_data) > 1:
-                raise OMETiff.ConversionError("More than one TiffData element")
-            elif len(tiff_data) == 1:
-                pixels.remove(tiff_data[0])
+            for td in tiff_data:
+                pixels.remove(td)
 
         ET.register_namespace('', self.ns['ome'])
         for k, v in self.ns.items():
             ET.register_namespace(k, v)
 
         for series_number, series in self.zarr_data.groups():
-            self.series.append(OMETiff.OMETiffSeries(self, int(series_number), series))
+            self.series.append(OMETiff.OMETiffSeries(self, int(series_number), series, force_rgb=force_rgb))
 
         logger.info('Number of series is {}'.format(len(self.series)))
 
@@ -589,7 +589,7 @@ def c_string(c):
     return ('0' * c_length + str(c))[-c_length:]
 
 
-def seadragon_tiffs(image_path, z_planes=None, delete_ome=False, compression='ZSTD', tile_size=1024):
+def seadragon_tiffs(image_path, z_planes=None, delete_ome=False, compression='ZSTD', tile_size=1024, force_rgb=False):
     """
     Convert an OME-TIFF file into a set of IIIF compatible TIFF files.
     Also generate companion files so that set can be viewed as entire file, or single Z planes.
@@ -622,7 +622,7 @@ def seadragon_tiffs(image_path, z_planes=None, delete_ome=False, compression='ZS
     filename = f'{filename}/{filename}'
 
     # Get metadata for input image file.
-    ome_contents = OMETiff(zarr_file)
+    ome_contents = OMETiff(zarr_file, force_rgb=force_rgb)
 
     # Create a non-ome tiff pyramid version of the file optimized for open sea dragon.
     # Now go through series.....
@@ -653,10 +653,10 @@ def seadragon_tiffs(image_path, z_planes=None, delete_ome=False, compression='ZS
     return ome_contents
 
 
-def main(imagefile, compression='jpeg', tile_size=1024):
+def main(imagefile, compression='jpeg', tile_size=1024, force_rgb=False):
     try:
         start_time = time.time()
-        seadragon_tiffs(imagefile, compression=compression, tile_size=tile_size)
+        seadragon_tiffs(imagefile, compression=compression, tile_size=tile_size, force_rgb=force_rgb)
         print(f"--- {(time.time() - start_time):.2f} seconds ---")
         usage = resource.getrusage(resource.RUSAGE_SELF)
         print(f"  utime: {usage.ru_utime:.2f}")
