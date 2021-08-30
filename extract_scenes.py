@@ -670,6 +670,10 @@ def main(imagefile, compression='jpeg', tile_size=1024, force_rgb=False):
 
 
 if __name__ == '__main__':
-    if len(sys.argv) == 3:
+    force_rgb = False
+    if len(sys.argv) >= 3:
         OMETiff.OMETiffSeries.JPEG_QUALITY = int(sys.argv[2])
-    sys.exit(main(sys.argv[1]))
+        if len(sys.argv) == 4:
+            if sys.argv[3] == 'True':
+                force_rgb = True
+    sys.exit(main(sys.argv[1], force_rgb=force_rgb))
