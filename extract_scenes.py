@@ -81,9 +81,20 @@ class OMETiff:
                 self.RGB = False
 
             # Create a dictionary of values in Channels to simplify usage
-            self.Channels = [{**{k: OMETiff.map_value(v) for k, v in c.attrib.items()}, **{'RGB': self.RGB}}
-                             for c in channels]
-
+            if force_rgb:
+                self.Channels = [
+                    {
+                        'ID': 'Channel:0:0',
+                        "SamplesPerPixel": 3,
+                        "RGB": True,
+                        "Name": "TL Brightfield",
+                        "Fluor": "TL Brightfield",
+                        "IlluminationType": "Transmitted",
+                    }
+                ]
+            else:
+                self.Channels = [{**{k: OMETiff.map_value(v) for k, v in c.attrib.items()}, **{'RGB': self.RGB}}
+                                 for c in channels]
         @property
         def Name(self):
             return self.Image.get('Name')
