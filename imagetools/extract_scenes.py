@@ -1,3 +1,5 @@
+#!/usr/bin/python
+
 import copy
 import json
 import logging
@@ -12,6 +14,7 @@ import tempfile
 import time
 import uuid
 import numpy as np
+import argparse
 
 import xml.etree.ElementTree as ET
 import zarr
@@ -578,7 +581,9 @@ def set_omexml(file, omexml):
     :param omexml: OME-XML tree
     :return: OME-XML value
     """
-    with tempfile.TemporaryDirectory() as tmpdirname:
+    global TMPDIR
+
+    with tempfile.TemporaryDirectory(dir=TMPDIR) as tmpdirname:
         xmlfile = f'{tmpdirname}/ometif.xml'
         omexml.write(xmlfile, encoding='unicode')
         args = ['-set', xmlfile, file]
@@ -663,8 +668,12 @@ def seadragon_tiffs(image_path, z_planes=None, delete_ome=False, compression='ZS
     ome_contents.dump(filename)
     return ome_contents
 
-
-def main(imagefile, compression='jpeg', tile_size=1024, force_rgb=False):
+def run(imagefile, jpeg_quality=80, compression='jpeg', tile_size=1024, force_rgb=False, processing_dir=None):
+    global TMPDIR
+    
+    OMETiff.OMETiffSeries.JPEG_QUALITY = jpeg_quality
+    TMPDIR = processing_dir
+    
     try:
         start_time = time.time()
         seadragon_tiffs(imagefile, compression=compression, tile_size=tile_size, force_rgb=force_rgb)
@@ -679,12 +688,17 @@ def main(imagefile, compression='jpeg', tile_size=1024, force_rgb=False):
         print(r.stderr)
         return 1
 
+def main():
+    parser = argparse.ArgumentParser(description='Tool to extract scenes from an image.')
+    parser.add_argument( 'imagefile', action='store', type=str, help='The image file to extract scenes from.')
+    parser.add_argument( '--jpeg_quality', help='The compression quality', action='store', type=int, default=80)
+    parser.add_argument( '--compression', help='The compression algorithm to use in generated file', action='store', type=str, default='jpeg')
+    parser.add_argument( '--tile_size', help='The size of the generated tiles', action='store', type=int, default=1024)
+    parser.add_argument( '--force_rgb', action='store', type=bool, help='Force generating the RGB channels.', default=False)
+    parser.add_argument( '--processing_dir', action='store', type=str, help='The temporary directory for the image processing.', default=None)
+
+    args = parser.parse_args()
+    run(args.imagefile, jpeg_quality=args.jpeg_quality, compression=args.compression, tile_size=args.tile_size, force_rgb=args.force_rgb, processing_dir=args.processing_dir)
 
 if __name__ == '__main__':
-    force_rgb = False
-    if len(sys.argv) >= 3:
-        OMETiff.OMETiffSeries.JPEG_QUALITY = int(sys.argv[2])
-        if len(sys.argv) == 4:
-            if sys.argv[3] == 'True':
-                force_rgb = True
-    sys.exit(main(sys.argv[1], force_rgb=force_rgb))
+    sys.exit(main())
