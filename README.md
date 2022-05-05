@@ -53,7 +53,7 @@ From the directory where the `imagefile` resides, run:
 extract_scenes <imagefile>
 ```
 
-The script generates a folder with the `<imagefile>` name (w/o its extension) having `*.companion.ome`, `*.ome.tif`, `*..ome.xml`, `*.json` files and a `*.zarr` directory.
+The script generates a folder with the `<imagefile>` name (w/o its extension) having `*.companion.ome`, `*.ome.tif`, `*.ome.xml`, `*.json` files and a `*.zarr` directory.
 
 Obviously, you can use also the optional parameters. Example:
 
