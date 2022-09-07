@@ -28,10 +28,10 @@ FORMAT = "[%(filename)s:%(lineno)s - %(funcName)20s() ] %(message)s"
 logging.basicConfig(format=FORMAT)
 logger.setLevel(logging.INFO)
 
-BFCONVERT_CMD = '/usr/local/bin/bftools/bfconvert'
-SHOWINF_CMD = '/usr/local/bin/bftools/showinf'
-TIFFCOMMENT_CMD = '/usr/local/bin/bftools/tiffcomment'
-BIOFORMATS2RAW_CMD = '/usr/local/bin/bioformats2raw'
+BFCONVERT_CMD = 'bfconvert'
+SHOWINF_CMD = 'showinf'
+TIFFCOMMENT_CMD = 'tiffcomment'
+BIOFORMATS2RAW_CMD = 'bioformats2raw'
 
 # Make sure we have enough memory to run bfconvert on big files
 BF_ENV = dict(os.environ, **{'BF_MAX_MEM': '24g'})
@@ -191,7 +191,7 @@ class OMETiff:
                 # Compute resolution (pixels/cm) from physical size per pixel and units.
                 # If compression is jpeg, set quality level to be JPEG_QUALITY.
                 options = dict(tile=(tile_size, tile_size),
-                               compress=('jpeg', self.JPEG_QUALITY) if compression.lower() == 'jpeg' else compression,
+                               compression=('jpeg', self.JPEG_QUALITY) if compression.lower() == 'jpeg' else compression,
                                description=f"Single image plane from {filename}",
                                metadata=None)
                 physical_size = self.PhysicalSize
@@ -211,6 +211,7 @@ class OMETiff:
                     # JPEG compression requires that data be 8 bit, not 16
                     logger.info(f'Converting from uint16 to uint8')
                     histogram, bins = skimage.exposure.histogram(image)
+                    image = skimage.exposure.equalize_hist(image)  # Equalize image to enhance contrast.
                     image = skimage.util.img_as_ubyte(image)
                     options.update({'photometric': 'MINISBLACK'})
                     iiif_pixels.set('Type', 'uint8')
@@ -234,10 +235,10 @@ class OMETiff:
                 logger.info(f'writing base image....{image.shape}')
                 # Write out image data, and layers of pyramid. Layers are produced by just subsampling image, which
                 # is consistent with what is done in bioformats libary.
-                tiff_out.save(image, **options)
+                tiff_out.write(image, **options)
                 logger.info(f'writing pyramid with {resolutions} levels ....')
                 for i in range(1, resolutions):
-                    tiff_out.save(image[::2 ** i, ::2 ** i], subfiletype=1, **options)
+                    tiff_out.write(image[::2 ** i, ::2 ** i], subfiletype=1, **options)
 
             # Now add OMEXML data to the output.  Because OMEXML is unicode encoded, we cannot write this in tifffile.
             set_omexml(outfile, iiif_omexml)
