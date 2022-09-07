@@ -2,7 +2,7 @@ import os
 import sys
 import xml.etree.ElementTree as ET
 from tifffile import TiffWriter, TiffFile
-from extract_scenes import set_omexml
+from imagetools.extract_scenes import set_omexml
 import logging
 
 logger = logging.getLogger(__name__)
@@ -25,7 +25,7 @@ def consolidate_companion(companion_file):
 
     # Now write the new OME TIFF File
     with TiffWriter(ome_filename, bigtiff=True) as ometiff:
-        options = dict(tile=(256, 256), compress=('jpeg', 80),
+        options = dict(tile=(256, 256), compression=('jpeg', 80),
             description = f"Single image plane from",
         )
         for filename in [e.get('FileName') for e in omexml.getroot().findall('.//ome:UUID', ns)]:
