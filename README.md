@@ -14,6 +14,7 @@ raw2ometiff (https://github.com/glencoesoftware/raw2ometiff)
 ```
 wget https://github.com/glencoesoftware/bioformats2raw/releases/download/v0.3.0/bioformats2raw-0.3.0.zip
 wget https://downloads.openmicroscopy.org/bio-formats/6.6.1/artifacts/bftools.zip
+wget https://github.com/glencoesoftware/raw2ometiff/releases/download/v0.3.1/raw2ometiff-0.3.1.zip
 ```
 
  - Unzip them:
@@ -21,6 +22,8 @@ wget https://downloads.openmicroscopy.org/bio-formats/6.6.1/artifacts/bftools.zi
 ```
 unzip bioformats2raw-0.3.0.zip -d /usr/local/share/applications
 unzip bftools.zip -d /usr/local/share/applications
+unzip raw2ometiff-0.3.1.zip -d /usr/local/share/applications
+
 ```
 
  - Create symbolic links:
@@ -29,20 +32,29 @@ unzip bftools.zip -d /usr/local/share/applications
 cd /usr/local/bin
 ln -s /usr/local/share/applications/bioformats2raw-0.3.0/bin/bioformats2raw  bioformats2raw
 ln -s /usr/local/share/applications/bftools bftools
+ln -s /usr/local/share/applications/bftools/bfconvert bfconvert
+ln -s /usr/local/share/applications/bftools/showinf showinf
+ln -s /usr/local/share/applications/raw2ometiff-0.3.1/bin/raw2ometiff  bioformats2raw
 ```
 
  - Install Python packages:
 
 ```
-yum install python3-lxml
-yum install blosc
-
 pip3 install --upgrade bdbag[boto,globus]
 pip3 install --upgrade scikit-image
 pip3 install --upgrade zarr
 pip3 install --upgrade imagecodecs
+
 ```
 
+  - Install system dependencies
+```
+dnf install blosc
+dnf install java-17-openjdk
+dnf install python3-lxml
+dnf install tiffinfo
+dnf install libtiff-toolsq
+```
 
 ## Python Installation
 
