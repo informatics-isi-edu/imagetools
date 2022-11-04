@@ -40,11 +40,9 @@ ln -s /usr/local/share/applications/raw2ometiff-0.3.1/bin/raw2ometiff  bioformat
  - Install Python packages:
 
 ```
-pip3 install --upgrade bdbag[boto,globus]
 pip3 install --upgrade scikit-image
 pip3 install --upgrade zarr
 pip3 install --upgrade imagecodecs
-
 ```
 
   - Install system dependencies
