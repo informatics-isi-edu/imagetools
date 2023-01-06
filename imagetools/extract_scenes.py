@@ -25,8 +25,6 @@ TMPDIR = None
 
 logger = logging.getLogger(__name__)
 FORMAT = "[%(filename)s:%(lineno)s - %(funcName)20s() ] %(message)s"
-logging.basicConfig(format=FORMAT)
-logger.setLevel(logging.INFO)
 
 BFCONVERT_CMD = 'bfconvert'
 SHOWINF_CMD = 'showinf'
@@ -702,4 +700,7 @@ def main():
     run(args.imagefile, jpeg_quality=args.jpeg_quality, compression=args.compression, tile_size=args.tile_size, force_rgb=args.force_rgb, processing_dir=args.processing_dir)
 
 if __name__ == '__main__':
+    logging.basicConfig(format=FORMAT)
+    logger.setLevel(logging.INFO)
+    
     sys.exit(main())
