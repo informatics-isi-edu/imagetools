@@ -363,7 +363,8 @@ class OMETiff:
             ET.register_namespace(k, v)
 
         for series_number, series in self.zarr_data.groups():
-            self.series.append(OMETiff.OMETiffSeries(self, int(series_number), series, force_rgb=force_rgb))
+            if series_number != 'OME':
+                self.series.append(OMETiff.OMETiffSeries(self, int(series_number), series, force_rgb=force_rgb))
 
         logger.info('Number of series is {}'.format(len(self.series)))
 
