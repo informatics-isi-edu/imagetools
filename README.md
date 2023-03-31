@@ -64,6 +64,53 @@ pip3 install .
 
 The installation will generate also the Python `extract_scenes` script.
 
+## Installation on Red Hat Enterprise Linux release 9.1
+
+  - Install EPEL Repository
+```
+subscription-manager repos --enable codeready-builder-for-rhel-9-$(arch)-rpms
+dnf install https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm
+```
+
+  - Install Prerequisites
+```
+yum update -y
+yum install python3-pip -y
+dnf install java-17-openjdk
+dnf install blosc
+```
+
+  - Install Python packages:
+```
+pip3 install --upgrade numpy
+pip3 install --upgrade zarr
+pip3 install --upgrade scikit-image
+pip3 install --upgrade imagecodecs
+```
+  - Get the latest `bioformats2raw` and `bftools` applications
+```
+wget https://downloads.openmicroscopy.org/bio-formats/6.12.0/artifacts/bftools.zip
+wget https://github.com/glencoesoftware/bioformats2raw/releases/download/v0.6.1/bioformats2raw-0.6.1.zip
+```
+  - Unzip them:
+```
+unzip bftools.zip -d /usr/local/share/applications
+unzip bioformats2raw-0.6.1.zip -d /usr/local/share/applications
+```
+  - Create symbolic links
+```
+cd /usr/local/bin
+ln -s /usr/local/share/applications/bftools/tiffcomment tiffcomment
+ln -s /usr/local/share/applications/bftools/showinf showinf
+ln -s /usr/local/share/applications/bioformats2raw-0.6.1/bin/bioformats2raw  bioformats2raw
+```
+  - Install the Python `imagetools` Package
+```
+git clone https://github.com/informatics-isi-edu/imagetools.git
+cd imagetools
+pip3 install .
+```
+
 ## Extracting Scenes
 
 You can extract scenes by running the `extract_scenes` script:
