@@ -42,6 +42,7 @@ IIIF_FILE = "{file}-s{s}-z{z}-c{c}.ome.tif"
 Z_OME_FILE = "{file}_S{s}_Z{z}.ome.tif"
 #PROJECTION_FILE="{file}.ome.tif"
 PROJECTION_FILE="{file}.tif"
+OME_TIF_FILE="{file}.ome.tif"
 NUMBER_OF_Z_INDEX = None
 NUMBER_OF_CHANNELS = None
 
@@ -344,6 +345,23 @@ class OMETiff:
         def __init__(self, msg):
             self.msg = msg
 
+    def add_xml_namespace_prefix(self, xml_file, separator, prefix):
+        fr = open(xml_file, 'r')
+        temp_xml_file = f'{xml_file}_temp.xml'
+        fw = open(temp_xml_file, 'w')
+        while True:
+            line = fr.readline()
+            if not line:
+                break
+            tokens = line.split(separator)
+            if len(tokens) == 2:
+                line = f'{tokens[0]}{separator}{prefix}{tokens[1]}'
+                
+            fw.write(line)
+        fr.close()
+        fw.close()
+        shutil.move(temp_xml_file, xml_file)
+
     def __init__(self, filename, force_rgb=False):
         self.filename = filename
         self.filebase = re.sub(r'\.zarr$', '', os.path.basename(filename))
@@ -355,7 +373,11 @@ class OMETiff:
         logger.info("Getting {} metadata....".format(filename))
         self.zarr_data = zarr.open(zarr.NestedDirectoryStore(filename), 'r')
         #self.omexml = ET.parse(f"{filename}/OME/METADATA.ome.xml")
-        self.omexml = ET.parse(f"{os.path.dirname(filename)}/SOURCEMETADATA.ome.xml")
+        try:
+            self.omexml = ET.parse(f"{os.path.dirname(filename)}/SOURCEMETADATA.ome.xml")
+        except:
+            self.add_xml_namespace_prefix(f"{os.path.dirname(filename)}/SOURCEMETADATA.ome.xml", 'xmlns="http://www.openmicroscopy.org/Schemas/OME/2016-06" ', 'xmlns:ome="http://www.openmicroscopy.org/Schemas/OME/2016-06" ')
+            self.omexml = ET.parse(f"{os.path.dirname(filename)}/SOURCEMETADATA.ome.xml")
 
         for pixels in self.omexml.findall('.//ome:Pixels', self.ns):
             for e in pixels.findall('.//ome:MetadataOnly', self.ns):
@@ -867,7 +889,45 @@ def projection_ome_tiff(image_path, projection_type, force_rgb=False, compressio
 
     return ome_contents
 
-def run(imagefile, jpeg_quality=80, compression='jpeg', tile_size=1024, force_rgb=False, processing_dir=None, projection_type=None, pixel_type=None):
+def convert_to_ome_tiff(image_path):
+    """
+    Convert the image file to a OME-TIFF file.
+
+    :param image_path: Input image file in any format recognized by bioformats
+    """
+
+    image_file = os.path.basename(image_path)
+    if is_zarr(image_path):
+        filename = re.sub('[-.]zarr', '', image_file)
+        zarr_file = image_path
+    else:
+        filename, _ext = os.path.splitext(image_file)
+        outdir = f"{filename}"
+        zarr_file = OMETiff.generate_zarr_file(image_path, outdir)
+
+    try:
+        os.mkdir(filename)
+    except FileExistsError:
+        pass
+
+    filename = f'{filename}/{filename}'
+
+    # Get metadata for input image file.
+    ome_contents = OMETiff(zarr_file)
+
+    logger.info(f'NUMBER_OF_SERIES: {len(ome_contents.series)}')
+
+    # Generate the ome.tiff projection
+    outfile = OME_TIF_FILE.format(file=filename)
+
+    with open(outfile,'wb') as imout:
+        for series in ome_contents.series:
+            image = series.zarr_series['0'][0, :, :, :, :]
+            imwrite(imout,image)
+
+    return ome_contents
+
+def run(imagefile, jpeg_quality=80, compression='jpeg', tile_size=1024, force_rgb=False, processing_dir=None, projection_type=None, pixel_type=None, convert2ome=False):
     global TMPDIR
     
     OMETiff.OMETiffSeries.JPEG_QUALITY = jpeg_quality
@@ -877,6 +937,8 @@ def run(imagefile, jpeg_quality=80, compression='jpeg', tile_size=1024, force_rg
         start_time = time.time()
         if projection_type != None:
             projection_ome_tiff(imagefile, projection_type, force_rgb=force_rgb, compression=compression, pixel_type=pixel_type, tile_size=tile_size)
+        elif convert2ome==True:
+            convert_to_ome_tiff(imagefile)
         else:
             seadragon_tiffs(imagefile, compression=compression, tile_size=tile_size, force_rgb=force_rgb)
         print(f"--- {(time.time() - start_time):.2f} seconds ---")
@@ -897,12 +959,13 @@ def main():
     parser.add_argument( '--compression', help='The compression algorithm to use in generated file', action='store', type=str, default='jpeg')
     parser.add_argument( '--tile_size', help='The size of the generated tiles', action='store', type=int, default=1024)
     parser.add_argument( '--force_rgb', action='store', type=bool, help='Force generating the RGB channels.', default=False)
+    parser.add_argument( '--convert2ome', action='store', type=bool, help='Force generating the RGB channels.', default=False)
     parser.add_argument( '--projection_type', action='store', type=str, help='Force the z projections. Valid values: min, max, mean.', default=None)
     parser.add_argument( '--processing_dir', action='store', type=str, help='The temporary directory for the image processing.', default=None)
     parser.add_argument( '--pixel_type', action='store', type=str, help='The type of the pixel. For example uint8.', default=None)
 
     args = parser.parse_args()
-    run(args.imagefile, jpeg_quality=args.jpeg_quality, compression=args.compression, tile_size=args.tile_size, force_rgb=args.force_rgb, processing_dir=args.processing_dir, projection_type=args.projection_type, pixel_type=args.pixel_type)
+    run(args.imagefile, jpeg_quality=args.jpeg_quality, compression=args.compression, tile_size=args.tile_size, force_rgb=args.force_rgb, processing_dir=args.processing_dir, projection_type=args.projection_type, pixel_type=args.pixel_type, convert2ome=args.convert2ome)
 
 if __name__ == '__main__':
     logging.basicConfig(format=FORMAT)
