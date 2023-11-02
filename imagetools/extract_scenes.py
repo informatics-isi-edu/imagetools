@@ -2,6 +2,7 @@
 
 import copy
 import json
+import xmltodict
 import logging
 import math
 import os
@@ -255,7 +256,7 @@ class OMETiff:
                 f'generate_iiif_tiff execution time: {time.time() - start_time:.2f} rss: {end_rss:.2f} delta rss {delta_rss:.2f}'
             )
 
-        def iiif_omexml(self, z, channel):
+        def iiif_omexml(self, z, channel, SizeC=None):
             """
             Restructure the OME-TIFF XML description to only include specified z plane and channel.
             :param z: Z plane to include
@@ -273,7 +274,10 @@ class OMETiff:
 
             # Update Pixel....
             pixels = subset_omexml.find('.//ome:Pixels', self.ns)
-            pixels.set('SizeC', "3" if self.RGB else "1")
+            if SizeC == None:
+                pixels.set('SizeC', "3" if self.RGB else "1")
+            else:
+                pixels.set('SizeC', SizeC)
             pixels.set('SizeZ', "1")
 
             tiffdata_tag = "{http://www.openmicroscopy.org/Schemas/OME/2016-06}TiffData"
@@ -474,17 +478,40 @@ class OMETiff:
         with open(outfile,'wb') as imout:
             for series in self.series:
                 # Compute the number of pyramid levels required so get at 1K pixels at the top of the pyramid.
-                iiif_omexml = series.iiif_omexml(0, 0)  # Get single plane OME-XML
+                iiif_omexml = series.iiif_omexml(0, 0, str(series.SizeC))  # Get single plane OME-XML
                 iiif_pixels = iiif_omexml.getroot().find('.//ome:Pixels', series.ns)
                 resolutions = int(math.log2(max(series.SizeX, series.SizeY)) - 9) if resolutions is None else resolutions
+                
+                metadata = OMETiff.xml2json(f'{outdir}/SOURCEMETADATA.ome.xml')
+                """
+                Remove the @ prefix of Channel keys from the JSON object
+                """
+                channels = metadata['OME']['Image']['Pixels']['Channel']
+                metadata_channels = []
+                for channel in channels:
+                    channel = {k[1:] if k[0]=='@' else k:v for k,v in channel.items()}
+                    metadata_channels.append(channel)
+            
+                options = dict(metadata={'PhysicalSizeX': metadata['OME']['Image']['Pixels']['@PhysicalSizeX'],
+                                         'PhysicalSizeXUnit': metadata['OME']['Image']['Pixels']['@PhysicalSizeXUnit'],
+                                         'PhysicalSizeY': metadata['OME']['Image']['Pixels']['@PhysicalSizeY'],
+                                         'PhysicalSizeYUnit': metadata['OME']['Image']['Pixels']['@PhysicalSizeYUnit'],
+                                         'PhysicalSizeZ': metadata['OME']['Image']['Pixels']['@PhysicalSizeZ'],
+                                         'PhysicalSizeZUnit': metadata['OME']['Image']['Pixels']['@PhysicalSizeZUnit'],
+                                         'axes': 'CZYX',
+                                         'Channel': metadata_channels
+                                         })
+
+                """
                 options = dict(metadata={'axes': 'CZYX',
-                                         'Channel': {'Name': series.channel_names},
+                                         'Channel': metadata_channels,
                                          'PhysicalSizeX': iiif_pixels.get('PhysicalSizeX'),
                                          'PhysicalSizeXUnit': iiif_pixels.get('PhysicalSizeXUnit'),
                                          'PhysicalSizeY': iiif_pixels.get('PhysicalSizeY'),
                                          'PhysicalSizeYUnit': iiif_pixels.get('PhysicalSizeYUnit')
                                          }
                                )
+                """
                 image = series.projection
                 logger.info(f'checking base image....{image.shape}')
     
@@ -524,13 +551,18 @@ class OMETiff:
                     logger.info(f'writing base image....{image.shape}')
                     logger.info(f'image dtype: {image.dtype}')
                     logger.info(f'image ndim: {image.ndim}')
+                    #logger.info(f'options: {json.dumps(options,indent=4)}')
+                    logger.info(f'SizeC: {series.SizeC}, RGB: {series.RGB}')
+                    
                     # Write out image data, and layers of pyramid. Layers are produced by just subsampling image, which
                     # is consistent with what is done in bioformats libary.
                     imwrite(imout,image, **options)
+                    """
                     logger.info(f'writing pyramid with {resolutions} levels ....')
                     for i in range(1, resolutions):
                         tiff_out.write(image[::2 ** i, ::2 ** i], subfiletype=1, **options)
                     set_omexml(outfile, iiif_omexml)
+                    """
                 else:
                     logger.info(f'writing unchanged base image....{image.shape}')
                     imwrite(imout, 
@@ -675,6 +707,19 @@ class OMETiff:
             logger.info(result.stderr)
         logger.info(f'execution time: {time.time() - start_time:.2f}')
         return result.stdout
+
+    @staticmethod
+    def xml2json(xmlfile):
+        """
+        Convert the xml metadata file to a JSON metadata file.
+        :param xmlfile:
+        :return: the metadata JSON object
+        """
+
+        with open(xmlfile) as xml_file:
+            data_dict = xmltodict.parse(xml_file.read())
+        
+        return data_dict
 
     @staticmethod
     def generate_zarr_file(infile, outdir):
@@ -834,7 +879,7 @@ def seadragon_tiffs(image_path, z_planes=None, delete_ome=False, compression='ZS
                 channel_name = channel_name.replace(" ", "_")
                 logger.info(f'Converting scene series:{series.Number} rgb:{series.RGB} name: {channel_name} z:{z} to compressed TIFF')
                 # Generate a iiif file for the page that corresponds to this channel.
-                print(f'calling generate_iiif_tiff with channel_number={channel_number}')
+                logger.info(f'calling generate_iiif_tiff with channel_number={channel_number}')
                 series.generate_iiif_tiff(filename,
                                           z=z, channel_number=channel_number,
                                           compression=compression,
@@ -917,13 +962,35 @@ def convert_to_ome_tiff(image_path):
 
     logger.info(f'NUMBER_OF_SERIES: {len(ome_contents.series)}')
 
-    # Generate the ome.tiff projection
+    metadata = OMETiff.xml2json(f'{outdir}/SOURCEMETADATA.ome.xml')
+    """
+    Remove the @ prefix of Channel keys from the JSON object
+    """
+    channels = metadata['OME']['Image']['Pixels']['Channel']
+    metadata_channels = []
+    for channel in channels:
+        channel = {k[1:] if k[0]=='@' else k:v for k,v in channel.items()}
+        metadata_channels.append(channel)
     outfile = OME_TIF_FILE.format(file=filename)
+
+    options = dict(metadata={'PhysicalSizeX': metadata['OME']['Image']['Pixels']['@PhysicalSizeX'],
+                             'PhysicalSizeXUnit': metadata['OME']['Image']['Pixels']['@PhysicalSizeXUnit'],
+                             'PhysicalSizeY': metadata['OME']['Image']['Pixels']['@PhysicalSizeY'],
+                             'PhysicalSizeYUnit': metadata['OME']['Image']['Pixels']['@PhysicalSizeYUnit'],
+                             'PhysicalSizeZ': metadata['OME']['Image']['Pixels']['@PhysicalSizeZ'],
+                             'PhysicalSizeZUnit': metadata['OME']['Image']['Pixels']['@PhysicalSizeZUnit'],
+                             'BigEndian': metadata['OME']['Image']['Pixels']['@BigEndian'],
+                             'SignificantBits': metadata['OME']['Image']['Pixels']['@SignificantBits'],
+                             'Type': metadata['OME']['Image']['Pixels']['@Type'],
+                             'axes': 'CZYX',
+                             'Channel': metadata_channels
+                             })
 
     with open(outfile,'wb') as imout:
         for series in ome_contents.series:
             image = series.zarr_series['0'][0, :, :, :, :]
-            imwrite(imout,image)
+            logger.info(f'image.shape: {image.shape}')
+            imwrite(imout,image, **options)
 
     return ome_contents
 
