@@ -38,7 +38,12 @@ setup(
     requires=['os',
               'sys',
               'lxml',
-              'deriva'
+              'deriva',
+              'xmltodict',
+              'zarr',
+              'numpy',
+              'scikit-image',
+              'imagecodecs'
               ],
     license='Apache 2.0',
     classifiers=[
