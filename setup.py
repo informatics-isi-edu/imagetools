@@ -14,7 +14,7 @@
 # limitations under the License.
 #
 
-from distutils.core import setup
+from setuptools import setup
 
 url = "https://github.com/informatics-isi-edu/imagetools"
 author = 'USC Information Sciences Institute, Informatics Systems Research Division'
