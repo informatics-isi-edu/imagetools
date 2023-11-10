@@ -426,7 +426,7 @@ class OMETiff:
         :param pixel_type: uint8 or uint16
         :param tile_size: the size of the tile
         """
-        def generate_max_projection(series, projection_type):
+        def generate_projection(series, projection_type, channel_number):
             """
             Create/Update the projection_type image.
             :param series: series to use
@@ -439,7 +439,7 @@ class OMETiff:
                 series.channel_names.append(channel_name)
             logger.info(f'SERIES: {series.Number} NUMBER_OF_Z_INDEX: {series.SizeZ} NUMBER_OF_CHANNELS: {series.SizeC} CHANNEL_NAMES: {series.channel_names}')
             
-            image = series.zarr_series['0'][0, :, :, :, :]
+            image = series.zarr_series['0'][0, channel_number:channel_number+1, :, :, :]
             image_shape = image.shape
             logger.info(f'image.shape: {image.shape}')
             if image_shape[1] == 1:
@@ -470,27 +470,44 @@ class OMETiff:
         start_time = time.time()
         start_usage = resource.getrusage(resource.RUSAGE_SELF)
         
+        metadata = OMETiff.xml2json(f'{outdir}/SOURCEMETADATA.ome.xml')
+        channels = metadata['OME']['Image']['Pixels']['Channel']
+        index=0
+        for channel in channels:
+            if channel['@Color'] == "-1":
+                break
+            else:
+                index +=1
+        if index == len(channels):
+            channel_number = 0
+        else:
+            channel_number = index
+            
         for series in self.series:
-            generate_max_projection(series, projection_type)
+            generate_projection(series, projection_type, channel_number)
         
         outfile = PROJECTION_FILE.format(file=filename)
 
         with open(outfile,'wb') as imout:
             for series in self.series:
                 # Compute the number of pyramid levels required so get at 1K pixels at the top of the pyramid.
-                iiif_omexml = series.iiif_omexml(0, 0, str(series.SizeC))  # Get single plane OME-XML
+                #iiif_omexml = series.iiif_omexml(0, 0, str(series.SizeC))  # Get single plane OME-XML
+                iiif_omexml = series.iiif_omexml(0, 0)  # Get single plane OME-XML
                 iiif_pixels = iiif_omexml.getroot().find('.//ome:Pixels', series.ns)
                 resolutions = int(math.log2(max(series.SizeX, series.SizeY)) - 9) if resolutions is None else resolutions
                 
-                metadata = OMETiff.xml2json(f'{outdir}/SOURCEMETADATA.ome.xml')
                 """
                 Remove the @ prefix of Channel keys from the JSON object
                 """
                 channels = metadata['OME']['Image']['Pixels']['Channel']
                 metadata_channels = []
+                index = 0
                 for channel in channels:
                     channel = {k[1:] if k[0]=='@' else k:v for k,v in channel.items()}
-                    metadata_channels.append(channel)
+                    if index == channel_number:
+                        metadata_channels.append(channel)
+                    else:
+                        index +=1
             
                 options = dict(metadata={'PhysicalSizeX': metadata['OME']['Image']['Pixels']['@PhysicalSizeX'],
                                          'PhysicalSizeXUnit': metadata['OME']['Image']['Pixels']['@PhysicalSizeXUnit'],
@@ -552,7 +569,7 @@ class OMETiff:
                     logger.info(f'image dtype: {image.dtype}')
                     logger.info(f'image ndim: {image.ndim}')
                     #logger.info(f'options: {json.dumps(options,indent=4)}')
-                    logger.info(f'SizeC: {series.SizeC}, RGB: {series.RGB}')
+                    #logger.info(f'SizeC: {series.SizeC}, RGB: {series.RGB}')
                     
                     # Write out image data, and layers of pyramid. Layers are produced by just subsampling image, which
                     # is consistent with what is done in bioformats libary.
