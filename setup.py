@@ -35,9 +35,7 @@ setup(
         ]
     },
     packages=['imagetools'],
-    install_requires=['os',
-              'sys',
-              'lxml',
+    install_requires=['lxml',
               'deriva',
               'xmltodict',
               'zarr',
