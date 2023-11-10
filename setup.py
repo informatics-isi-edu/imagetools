@@ -35,7 +35,7 @@ setup(
         ]
     },
     packages=['imagetools'],
-    requires=['os',
+    install_requires=['os',
               'sys',
               'lxml',
               'deriva',
@@ -43,7 +43,7 @@ setup(
               'zarr',
               'numpy',
               'scikit-image',
-              'imagecodecs'
+              'imagecodecs',
               ],
     license='Apache 2.0',
     classifiers=[
