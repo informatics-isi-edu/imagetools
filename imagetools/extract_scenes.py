@@ -472,6 +472,8 @@ class OMETiff:
         
         metadata = OMETiff.xml2json(f'{outdir}/SOURCEMETADATA.ome.xml')
         channels = metadata['OME']['Image']['Pixels']['Channel']
+        if type(channels) == dict:
+            channels = [channels]
         index=0
         for channel in channels:
             if channel['@Color'] == "-1":
@@ -500,6 +502,8 @@ class OMETiff:
                 Remove the @ prefix of Channel keys from the JSON object
                 """
                 channels = metadata['OME']['Image']['Pixels']['Channel']
+                if type(channels) == dict:
+                    channels = [channels]
                 metadata_channels = []
                 index = 0
                 for channel in channels:
@@ -984,6 +988,8 @@ def convert_to_ome_tiff(image_path):
     Remove the @ prefix of Channel keys from the JSON object
     """
     channels = metadata['OME']['Image']['Pixels']['Channel']
+    if type(channels) == dict:
+        channels = [channels]
     metadata_channels = []
     for channel in channels:
         channel = {k[1:] if k[0]=='@' else k:v for k,v in channel.items()}
