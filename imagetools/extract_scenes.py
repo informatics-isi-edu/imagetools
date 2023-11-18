@@ -1018,8 +1018,11 @@ def convert_to_ome_tiff(image_path):
     return ome_contents
 
 def run(imagefile, jpeg_quality=80, compression='jpeg', tile_size=1024, force_rgb=False, processing_dir=None, projection_type=None, pixel_type=None, convert2ome=False):
-    global TMPDIR
+    global TMPDIR, NUMBER_OF_Z_INDEX, NUMBER_OF_CHANNELS
     
+    
+    NUMBER_OF_Z_INDEX = None
+    NUMBER_OF_CHANNELS = None
     OMETiff.OMETiffSeries.JPEG_QUALITY = jpeg_quality
     TMPDIR = processing_dir
     
