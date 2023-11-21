@@ -519,6 +519,10 @@ class OMETiff:
                                          'PhysicalSizeYUnit': metadata['OME']['Image']['Pixels']['@PhysicalSizeYUnit'],
                                          'PhysicalSizeZ': metadata['OME']['Image']['Pixels']['@PhysicalSizeZ'],
                                          'PhysicalSizeZUnit': metadata['OME']['Image']['Pixels']['@PhysicalSizeZUnit'],
+                                         'BigEndian': metadata['OME']['Image']['Pixels']['@BigEndian'],
+                                         'SignificantBits': metadata['OME']['Image']['Pixels']['@SignificantBits'],
+                                         'Type': metadata['OME']['Image']['Pixels']['@Type'],
+                                         'AcquisitionDate': metadata['OME']['Image']['AcquisitionDate'],
                                          'axes': 'CZYX',
                                          'Channel': metadata_channels
                                          })
@@ -1005,6 +1009,7 @@ def convert_to_ome_tiff(image_path):
                              'BigEndian': metadata['OME']['Image']['Pixels']['@BigEndian'],
                              'SignificantBits': metadata['OME']['Image']['Pixels']['@SignificantBits'],
                              'Type': metadata['OME']['Image']['Pixels']['@Type'],
+                             'AcquisitionDate': metadata['OME']['Image']['AcquisitionDate'],
                              'axes': 'CZYX',
                              'Channel': metadata_channels
                              })
