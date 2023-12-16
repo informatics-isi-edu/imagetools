@@ -2,6 +2,7 @@
 
 import copy
 import json
+import xmltodict
 import logging
 import math
 import os
@@ -15,11 +16,14 @@ import time
 import uuid
 import numpy as np
 import argparse
+import shutil
 
 import xml.etree.ElementTree as ET
 import zarr
 import skimage, skimage.exposure
 from tifffile import TiffFile, TiffWriter
+from tifffile import imwrite
+import numpy
 
 TMPDIR = None
 
@@ -37,6 +41,9 @@ BF_ENV = dict(os.environ, **{'BF_MAX_MEM': '24g'})
 # Templates for output file names.
 IIIF_FILE = "{file}-s{s}-z{z}-c{c}.ome.tif"
 Z_OME_FILE = "{file}_S{s}_Z{z}.ome.tif"
+#PROJECTION_FILE="{file}.ome.tif"
+PROJECTION_FILE="{file}.tif"
+OME_TIF_FILE="{file}.ome.tif"
 NUMBER_OF_Z_INDEX = None
 NUMBER_OF_CHANNELS = None
 
@@ -73,6 +80,8 @@ class OMETiff:
             self.Interleaved = False
             self.Thumbnail = True if (self.Name == 'label image' or self.Name == 'macro image') else False
             channels = self.Pixels.findall('./ome:Channel', self.ns)
+            self.projection = None
+            self.channel_names = []
 
             if (self.Thumbnail or
                     (self.SizeC == 3 and channels[0].attrib['SamplesPerPixel'] == '3') or
@@ -247,7 +256,7 @@ class OMETiff:
                 f'generate_iiif_tiff execution time: {time.time() - start_time:.2f} rss: {end_rss:.2f} delta rss {delta_rss:.2f}'
             )
 
-        def iiif_omexml(self, z, channel):
+        def iiif_omexml(self, z, channel, SizeC=None):
             """
             Restructure the OME-TIFF XML description to only include specified z plane and channel.
             :param z: Z plane to include
@@ -265,7 +274,10 @@ class OMETiff:
 
             # Update Pixel....
             pixels = subset_omexml.find('.//ome:Pixels', self.ns)
-            pixels.set('SizeC', "3" if self.RGB else "1")
+            if SizeC == None:
+                pixels.set('SizeC', "3" if self.RGB else "1")
+            else:
+                pixels.set('SizeC', SizeC)
             pixels.set('SizeZ', "1")
 
             tiffdata_tag = "{http://www.openmicroscopy.org/Schemas/OME/2016-06}TiffData"
@@ -337,6 +349,23 @@ class OMETiff:
         def __init__(self, msg):
             self.msg = msg
 
+    def add_xml_namespace_prefix(self, xml_file, separator, prefix):
+        fr = open(xml_file, 'r')
+        temp_xml_file = f'{xml_file}_temp.xml'
+        fw = open(temp_xml_file, 'w')
+        while True:
+            line = fr.readline()
+            if not line:
+                break
+            tokens = line.split(separator)
+            if len(tokens) == 2:
+                line = f'{tokens[0]}{separator}{prefix}{tokens[1]}'
+                
+            fw.write(line)
+        fr.close()
+        fw.close()
+        shutil.move(temp_xml_file, xml_file)
+
     def __init__(self, filename, force_rgb=False):
         self.filename = filename
         self.filebase = re.sub(r'\.zarr$', '', os.path.basename(filename))
@@ -348,7 +377,11 @@ class OMETiff:
         logger.info("Getting {} metadata....".format(filename))
         self.zarr_data = zarr.open(zarr.NestedDirectoryStore(filename), 'r')
         #self.omexml = ET.parse(f"{filename}/OME/METADATA.ome.xml")
-        self.omexml = ET.parse(f"{os.path.dirname(filename)}/SOURCEMETADATA.ome.xml")
+        try:
+            self.omexml = ET.parse(f"{os.path.dirname(filename)}/SOURCEMETADATA.ome.xml")
+        except:
+            self.add_xml_namespace_prefix(f"{os.path.dirname(filename)}/SOURCEMETADATA.ome.xml", 'xmlns="http://www.openmicroscopy.org/Schemas/OME/2016-06" ', 'xmlns:ome="http://www.openmicroscopy.org/Schemas/OME/2016-06" ')
+            self.omexml = ET.parse(f"{os.path.dirname(filename)}/SOURCEMETADATA.ome.xml")
 
         for pixels in self.omexml.findall('.//ome:Pixels', self.ns):
             for e in pixels.findall('.//ome:MetadataOnly', self.ns):
@@ -374,6 +407,204 @@ class OMETiff:
             for z in range(i.SizeZ):
                 for c in range(i.SizeC):
                     self.uuid[(i.Number, z, c)] = uuid.uuid1()
+
+    def generate_projection_ome_tiff(self, 
+                                     filename, 
+                                     projection_type,
+                                     outdir,
+                                     resolutions=None, 
+                                     compression='jpeg',
+                                     pixel_type=None,
+                                     tile_size=1024):
+        """
+        Create the projection OME TIFF file
+        :param filename: Base name of the output file.
+        :param projection_type: The projection type. Valid values are max. min and mean.
+        :param outdir: Output directory of the output file.
+        :param resolutions: Number of pyramid resolutions to generate, defaults to 1K top pyramid size.
+        :param compression: Compression algorithm to use in generated file
+        :param pixel_type: uint8 or uint16
+        :param tile_size: the size of the tile
+        """
+        def generate_projection(series, projection_type, channel_number):
+            """
+            Create/Update the projection_type image.
+            :param series: series to use
+            """
+            
+            # set the series properties
+            for channel_number, channel in enumerate(series.Channels):
+                channel_name = channel.get('Name', channel['ID'])
+                channel_name = channel_name.replace(" ", "_")
+                series.channel_names.append(channel_name)
+            logger.info(f'SERIES: {series.Number} NUMBER_OF_Z_INDEX: {series.SizeZ} NUMBER_OF_CHANNELS: {series.SizeC} CHANNEL_NAMES: {series.channel_names}')
+            
+            image = series.zarr_series['0'][0, channel_number:channel_number+1, :, :, :]
+            image_shape = image.shape
+            logger.info(f'image.shape: {image.shape}')
+            if image_shape[1] == 1:
+                series.projection = image
+            else:
+                logger.info(f'Building the "{projection_type}" projection')
+                if projection_type == 'min':
+                    series.projection = image.min(axis=1, keepdims=True)
+                elif projection_type == 'mean':
+                    series.projection = image.mean(axis=1, keepdims=True)
+                elif projection_type == 'max':
+                    series.projection = image.max(axis=1, keepdims=True)
+                else:
+                    logger.info(f'Inavalide projection type: {projection_type}')
+                    sys.exit(1)
+                """
+                series.projection = series.zarr_series['0'][0, :, 0:1, :, :]
+                max_c,max_z,max_y,max_x = image_shape
+                for z in range(1,max_z):
+                    for c in range(0,max_c):
+                        for y in range(0,max_y):
+                            for x in range(0,max_x):
+                                if image[c,z,y,x] < series.projection[c,0,y,x]:
+                                    series.projection[c,0,y,x] = image[c,z,y,x]
+                """
+            logger.info(f'series.projection.shape: {series.projection.shape} series.projection size: {series.projection.size} series.projection nbytes: {series.projection.nbytes}')
+            
+        start_time = time.time()
+        start_usage = resource.getrusage(resource.RUSAGE_SELF)
+        
+        metadata = OMETiff.xml2json(f'{outdir}/SOURCEMETADATA.ome.xml')
+        channels = metadata['OME']['Image']['Pixels']['Channel']
+        if type(channels) == dict:
+            channels = [channels]
+        index=0
+        for channel in channels:
+            if channel['@Color'] == "-1":
+                break
+            else:
+                index +=1
+        if index == len(channels):
+            channel_number = 0
+        else:
+            channel_number = index
+            
+        for series in self.series:
+            generate_projection(series, projection_type, channel_number)
+        
+        outfile = PROJECTION_FILE.format(file=filename)
+
+        with open(outfile,'wb') as imout:
+            for series in self.series:
+                # Compute the number of pyramid levels required so get at 1K pixels at the top of the pyramid.
+                #iiif_omexml = series.iiif_omexml(0, 0, str(series.SizeC))  # Get single plane OME-XML
+                iiif_omexml = series.iiif_omexml(0, 0)  # Get single plane OME-XML
+                iiif_pixels = iiif_omexml.getroot().find('.//ome:Pixels', series.ns)
+                resolutions = int(math.log2(max(series.SizeX, series.SizeY)) - 9) if resolutions is None else resolutions
+                
+                """
+                Remove the @ prefix of Channel keys from the JSON object
+                """
+                channels = metadata['OME']['Image']['Pixels']['Channel']
+                if type(channels) == dict:
+                    channels = [channels]
+                metadata_channels = []
+                index = 0
+                for channel in channels:
+                    channel = {k[1:] if k[0]=='@' else k:v for k,v in channel.items()}
+                    if index == channel_number:
+                        metadata_channels.append(channel)
+                    else:
+                        index +=1
+            
+                options = dict(metadata={'PhysicalSizeX': metadata['OME']['Image']['Pixels']['@PhysicalSizeX'],
+                                         'PhysicalSizeXUnit': metadata['OME']['Image']['Pixels']['@PhysicalSizeXUnit'],
+                                         'PhysicalSizeY': metadata['OME']['Image']['Pixels']['@PhysicalSizeY'],
+                                         'PhysicalSizeYUnit': metadata['OME']['Image']['Pixels']['@PhysicalSizeYUnit'],
+                                         'PhysicalSizeZ': metadata['OME']['Image']['Pixels']['@PhysicalSizeZ'],
+                                         'PhysicalSizeZUnit': metadata['OME']['Image']['Pixels']['@PhysicalSizeZUnit'],
+                                         'BigEndian': metadata['OME']['Image']['Pixels']['@BigEndian'],
+                                         'SignificantBits': metadata['OME']['Image']['Pixels']['@SignificantBits'],
+                                         'Type': metadata['OME']['Image']['Pixels']['@Type'],
+                                         'AcquisitionDate': metadata['OME']['Image']['AcquisitionDate'],
+                                         'axes': 'CZYX',
+                                         'Channel': metadata_channels
+                                         })
+
+                """
+                options = dict(metadata={'axes': 'CZYX',
+                                         'Channel': metadata_channels,
+                                         'PhysicalSizeX': iiif_pixels.get('PhysicalSizeX'),
+                                         'PhysicalSizeXUnit': iiif_pixels.get('PhysicalSizeXUnit'),
+                                         'PhysicalSizeY': iiif_pixels.get('PhysicalSizeY'),
+                                         'PhysicalSizeYUnit': iiif_pixels.get('PhysicalSizeYUnit')
+                                         }
+                               )
+                """
+                image = series.projection
+                logger.info(f'checking base image....{image.shape}')
+    
+                if pixel_type == 'uint8' or series.RGB:
+                    options.update({'compression': ('jpeg', series.JPEG_QUALITY) if compression.lower() == 'jpeg' else compression})
+                    physical_size = series.PhysicalSize
+                    if physical_size is not None:
+                        options['resolution'] = (round(1 / physical_size[0]), round(1 / physical_size[1]), 'CENTIMETER')
+                    if compression == 'jpeg' and series.Type == 'uint16':
+                        # JPEG compression requires that data be 8 bit, not 16
+                        logger.info(f'Converting from uint16 to uint8')
+                        histogram, bins = skimage.exposure.histogram(image)
+                        image = skimage.exposure.equalize_hist(image)  # Equalize image to enhance contrast.
+                        image = skimage.util.img_as_ubyte(image)
+                        options.update({'photometric': 'MINISBLACK'})
+                        iiif_pixels.set('Type', 'uint8')
+                        iiif_pixels.set('SignificantBits', '8')
+                        series.ome_mods['Type'] = 'uint8'  # Keep track of changes made to metadata for later use
+                        series.ome_mods['SignificantBits'] = '8'  # Keep track of changes made to metadata for later use
+                        histogram, bins = skimage.exposure.histogram(image)
+                        series.Channels[0]['Intensity_Histogram'] = histogram.tolist()
+                        logger.info(f'writing image shape after uint16 to uint8 ....{image.shape} image size: {image.size} image nbytes: {image.nbytes}')
+                    if series.RGB:
+                        # Downstream tools will prefer interleaved RGB format, so convert image to that format.
+                        logger.info(f'interleaving RGB....{image.shape}')
+                        image = np.moveaxis(image, 0, -1)  # Interleaved image has to have C as last dimension.
+                        options.update({'photometric': 'RGB', 'planarconfig': 'CONTIG'})
+                        options['metadata']['axes'] = 'YXS'
+                        options['metadata']['Plane'] = {'PositionX': [0.0], 'PositionXUnit': ['µm']}
+                        series.ome_mods['Interleaved'] = 'true'  # Keep track of changes made to metadata for later use
+                        if not series.Thumbnail:
+                            value_image = skimage.color.rgb2hsv(image)[:, :, 2]
+                            histogram = skimage.exposure.histogram(value_image, nbins=256)[0]
+                            series.Channels[0]['Intensity_Histogram'] = histogram.tolist()
+                        logger.info(f'writing image shape after RGB ....{image.shape}')
+    
+                    logger.info(f'writing base image....{image.shape}')
+                    logger.info(f'image dtype: {image.dtype}')
+                    logger.info(f'image ndim: {image.ndim}')
+                    #logger.info(f'options: {json.dumps(options,indent=4)}')
+                    #logger.info(f'SizeC: {series.SizeC}, RGB: {series.RGB}')
+                    
+                    # Write out image data, and layers of pyramid. Layers are produced by just subsampling image, which
+                    # is consistent with what is done in bioformats libary.
+                    imwrite(imout,image, **options)
+                    """
+                    logger.info(f'writing pyramid with {resolutions} levels ....')
+                    for i in range(1, resolutions):
+                        tiff_out.write(image[::2 ** i, ::2 ** i], subfiletype=1, **options)
+                    set_omexml(outfile, iiif_omexml)
+                    """
+                else:
+                    logger.info(f'writing unchanged base image....{image.shape}')
+                    imwrite(imout, 
+                            image, 
+                            resolution=(1e4 / float(iiif_pixels.get('PhysicalSizeX')), 1e4 / float(iiif_pixels.get('PhysicalSizeY'))),
+                            **options
+                           )
+
+        with open(f'{outdir}/PROJECTION.ome.xml','w') as metadata:
+            metadata.write(OMETiff.source_metadata(outfile))
+        end_usage = resource.getrusage(resource.RUSAGE_SELF)
+        end_rss = end_usage.ru_maxrss / (2 ** 20 if platform.system() == 'Linux' else 2 ** 30)
+        delta_rss = end_rss - (start_usage.ru_maxrss / (2 ** 20 if platform.system() == 'Linux' else 2 ** 30))
+        logger.info(
+            f'generate_projection_ome_tiff execution time: {time.time() - start_time:.2f} rss: {end_rss:.2f} delta rss {delta_rss:.2f}'
+        )
+        return outfile
 
     def _json_metadata(self):
         """
@@ -501,6 +732,19 @@ class OMETiff:
             logger.info(result.stderr)
         logger.info(f'execution time: {time.time() - start_time:.2f}')
         return result.stdout
+
+    @staticmethod
+    def xml2json(xmlfile):
+        """
+        Convert the xml metadata file to a JSON metadata file.
+        :param xmlfile:
+        :return: the metadata JSON object
+        """
+
+        with open(xmlfile) as xml_file:
+            data_dict = xmltodict.parse(xml_file.read())
+        
+        return data_dict
 
     @staticmethod
     def generate_zarr_file(infile, outdir):
@@ -660,6 +904,7 @@ def seadragon_tiffs(image_path, z_planes=None, delete_ome=False, compression='ZS
                 channel_name = channel_name.replace(" ", "_")
                 logger.info(f'Converting scene series:{series.Number} rgb:{series.RGB} name: {channel_name} z:{z} to compressed TIFF')
                 # Generate a iiif file for the page that corresponds to this channel.
+                logger.info(f'calling generate_iiif_tiff with channel_number={channel_number}')
                 series.generate_iiif_tiff(filename,
                                           z=z, channel_number=channel_number,
                                           compression=compression,
@@ -668,15 +913,132 @@ def seadragon_tiffs(image_path, z_planes=None, delete_ome=False, compression='ZS
     ome_contents.dump(filename)
     return ome_contents
 
-def run(imagefile, jpeg_quality=80, compression='jpeg', tile_size=1024, force_rgb=False, processing_dir=None):
-    global TMPDIR
+def projection_ome_tiff(image_path, projection_type, force_rgb=False, compression='jpeg', pixel_type=None, tile_size=1024):
+    """
+    Convert the image file into a prjection OME-TIFF file.
+
+    :param image_path: Input image file in any format recognized by bioformats
+    """
+
+    image_file = os.path.basename(image_path)
+    if is_zarr(image_path):
+        filename = re.sub('[-.]zarr', '', image_file)
+        zarr_file = image_path
+    else:
+        filename, _ext = os.path.splitext(image_file)
+        outdir = f"{filename}"
+        zarr_file = OMETiff.generate_zarr_file(image_path, outdir)
+
+    try:
+        os.mkdir(filename)
+    except FileExistsError:
+        pass
+
+    filename = f'{filename}/{filename}'
+
+    # Get metadata for input image file.
+    ome_contents = OMETiff(zarr_file, force_rgb=force_rgb)
+
+    logger.info(f'NUMBER_OF_SERIES: {len(ome_contents.series)}')
+
+    # Generate the ome.tiff projection
+    outfile = ome_contents.generate_projection_ome_tiff(filename, projection_type, outdir, compression=compression, pixel_type=pixel_type, tile_size=tile_size)
+
+    if False:
+        logger.info(f'Running {BFCONVERT_CMD} -compression JPEG {outfile} {os.path.basename(outfile)}')
+        result = subprocess.run(
+            [BFCONVERT_CMD,
+             '-compression',
+             'JPEG',
+              outfile,
+              os.path.basename(outfile)],
+            env=BF_ENV, check=True, capture_output=True, universal_newlines=True)
+        if result.stderr:
+            logger.info(result.stderr)
+            raise OMETiff.ConversionError(result.stderr)
+
+    return ome_contents
+
+def convert_to_ome_tiff(image_path):
+    """
+    Convert the image file to a OME-TIFF file.
+
+    :param image_path: Input image file in any format recognized by bioformats
+    """
+
+    image_file = os.path.basename(image_path)
+    if is_zarr(image_path):
+        filename = re.sub('[-.]zarr', '', image_file)
+        zarr_file = image_path
+    else:
+        filename, _ext = os.path.splitext(image_file)
+        outdir = f"{filename}"
+        zarr_file = OMETiff.generate_zarr_file(image_path, outdir)
+
+    try:
+        os.mkdir(filename)
+    except FileExistsError:
+        pass
+
+    filename = f'{filename}/{filename}'
+
+    # Get metadata for input image file.
+    ome_contents = OMETiff(zarr_file)
+
+    logger.info(f'NUMBER_OF_SERIES: {len(ome_contents.series)}')
+
+    metadata = OMETiff.xml2json(f'{outdir}/SOURCEMETADATA.ome.xml')
+    """
+    Remove the @ prefix of Channel keys from the JSON object
+    """
+    channels = metadata['OME']['Image']['Pixels']['Channel']
+    if type(channels) == dict:
+        channels = [channels]
+    metadata_channels = []
+    for channel in channels:
+        channel = {k[1:] if k[0]=='@' else k:v for k,v in channel.items()}
+        metadata_channels.append(channel)
+    outfile = OME_TIF_FILE.format(file=filename)
+
+    options = dict(metadata={'PhysicalSizeX': metadata['OME']['Image']['Pixels']['@PhysicalSizeX'],
+                             'PhysicalSizeXUnit': metadata['OME']['Image']['Pixels']['@PhysicalSizeXUnit'],
+                             'PhysicalSizeY': metadata['OME']['Image']['Pixels']['@PhysicalSizeY'],
+                             'PhysicalSizeYUnit': metadata['OME']['Image']['Pixels']['@PhysicalSizeYUnit'],
+                             'PhysicalSizeZ': metadata['OME']['Image']['Pixels']['@PhysicalSizeZ'],
+                             'PhysicalSizeZUnit': metadata['OME']['Image']['Pixels']['@PhysicalSizeZUnit'],
+                             'BigEndian': metadata['OME']['Image']['Pixels']['@BigEndian'],
+                             'SignificantBits': metadata['OME']['Image']['Pixels']['@SignificantBits'],
+                             'Type': metadata['OME']['Image']['Pixels']['@Type'],
+                             'AcquisitionDate': metadata['OME']['Image']['AcquisitionDate'],
+                             'axes': 'CZYX',
+                             'Channel': metadata_channels
+                             })
+
+    with open(outfile,'wb') as imout:
+        for series in ome_contents.series:
+            image = series.zarr_series['0'][0, :, :, :, :]
+            logger.info(f'image.shape: {image.shape}')
+            imwrite(imout,image, **options)
+
+    return ome_contents
+
+def run(imagefile, jpeg_quality=80, compression='jpeg', tile_size=1024, force_rgb=False, processing_dir=None, projection_type=None, pixel_type=None, convert2ome=False):
+    global TMPDIR, NUMBER_OF_Z_INDEX, NUMBER_OF_CHANNELS
     
+    
+    NUMBER_OF_Z_INDEX = None
+    NUMBER_OF_CHANNELS = None
     OMETiff.OMETiffSeries.JPEG_QUALITY = jpeg_quality
     TMPDIR = processing_dir
     
     try:
         start_time = time.time()
-        seadragon_tiffs(imagefile, compression=compression, tile_size=tile_size, force_rgb=force_rgb)
+        if projection_type != None:
+            projection_ome_tiff(imagefile, projection_type, force_rgb=force_rgb, compression=compression, pixel_type=pixel_type, tile_size=tile_size)
+        elif convert2ome==True:
+            convert_to_ome_tiff(imagefile)
+        else:
+            seadragon_tiffs(imagefile, compression=compression, tile_size=tile_size, force_rgb=force_rgb)
         print(f"--- {(time.time() - start_time):.2f} seconds ---")
         usage = resource.getrusage(resource.RUSAGE_SELF)
         print(f"  utime: {usage.ru_utime:.2f}")
@@ -695,10 +1057,13 @@ def main():
     parser.add_argument( '--compression', help='The compression algorithm to use in generated file', action='store', type=str, default='jpeg')
     parser.add_argument( '--tile_size', help='The size of the generated tiles', action='store', type=int, default=1024)
     parser.add_argument( '--force_rgb', action='store', type=bool, help='Force generating the RGB channels.', default=False)
+    parser.add_argument( '--convert2ome', action='store', type=bool, help='Force generating the RGB channels.', default=False)
+    parser.add_argument( '--projection_type', action='store', type=str, help='Force the z projections. Valid values: min, max, mean.', default=None)
     parser.add_argument( '--processing_dir', action='store', type=str, help='The temporary directory for the image processing.', default=None)
+    parser.add_argument( '--pixel_type', action='store', type=str, help='The type of the pixel. For example uint8.', default=None)
 
     args = parser.parse_args()
-    run(args.imagefile, jpeg_quality=args.jpeg_quality, compression=args.compression, tile_size=args.tile_size, force_rgb=args.force_rgb, processing_dir=args.processing_dir)
+    run(args.imagefile, jpeg_quality=args.jpeg_quality, compression=args.compression, tile_size=args.tile_size, force_rgb=args.force_rgb, processing_dir=args.processing_dir, projection_type=args.projection_type, pixel_type=args.pixel_type, convert2ome=args.convert2ome)
 
 if __name__ == '__main__':
     logging.basicConfig(format=FORMAT)

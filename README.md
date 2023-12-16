@@ -118,7 +118,7 @@ You can extract scenes by running the `extract_scenes` script:
 ```
 extract_scenes --help
 
-usage: extract_scenes [-h] [--jpeg_quality JPEG_QUALITY] [--compression COMPRESSION] [--tile_size TILE_SIZE] [--force_rgb FORCE_RGB] [--processing_dir PROCESSING_DIR] imagefile
+usage: extract_scenes [-h] [--jpeg_quality JPEG_QUALITY] [--compression COMPRESSION] [--tile_size TILE_SIZE] [--force_rgb FORCE_RGB] [--processing_dir PROCESSING_DIR]  [--projection_type PROCESSING_DIR] imagefile
 
 Tool to extract scenes from an image.
 
@@ -135,8 +135,13 @@ optional arguments:
                         The size of the generated tiles
   --force_rgb FORCE_RGB
                         Force generating the RGB channels.
+  --projection_type PROJECTION_TYPE
+                        Get the z projection for the specified PROJECTION_TYPE.
+                        Valid values for the PROJECTION_TYPE are min, max and mean.
   --processing_dir PROCESSING_DIR
                         The temporary directory for the image processing.
+  --pixel_type PIXEL_TYPE
+                        The type of the pixel. For example uint8.
 ```
 
 The `imagefile` parameter is mandatory, while the rest are optionally. 
@@ -152,7 +157,8 @@ The script generates a folder with the `<imagefile>` name (w/o its extension) ha
 Obviously, you can use also the optional parameters. Example:
 
 ```
-extract_scenes 3XcBMPER-pHsp68-lacZ-tdTomato_E11.5_rnd1.lif_3XcBMPER-pHsp68-lacZ-tdTomato_E11.5_rnd1_Emb9-1.tif --processing_dir=/var/scratch/transcoding/tmp
+python3 extract_scenes.py 3XcBMPER-pHsp68-lacZ-tdTomato_E11.5_rnd1.lif_3XcBMPER-pHsp68-lacZ-tdTomato_E11.5_rnd1_Emb9-1.tif --processing_dir=/var/scratch/transcoding/tmp
+python3 extract_scenes.py --projection_type min --pixel_type uint8 --tile_size 512 10x-2x2tile-13002-ST-SN38-FU-CTX-Day4-111519_C04_G002_0001.oir
 ```
 
 Alternative, you can extract scenes from a Python application:

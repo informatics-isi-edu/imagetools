@@ -14,7 +14,7 @@
 # limitations under the License.
 #
 
-from distutils.core import setup
+from setuptools import setup
 
 url = "https://github.com/informatics-isi-edu/imagetools"
 author = 'USC Information Sciences Institute, Informatics Systems Research Division'
@@ -35,10 +35,13 @@ setup(
         ]
     },
     packages=['imagetools'],
-    requires=['os',
-              'sys',
-              'lxml',
-              'deriva'
+    install_requires=['lxml',
+              'deriva',
+              'xmltodict',
+              'zarr',
+              'numpy',
+              'scikit-image',
+              'imagecodecs',
               ],
     license='Apache 2.0',
     classifiers=[
