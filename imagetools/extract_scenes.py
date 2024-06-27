@@ -25,6 +25,11 @@ from tifffile import TiffFile, TiffWriter
 from tifffile import imwrite
 import numpy
 
+import traceback
+import getpass
+import socket
+
+
 TMPDIR = None
 
 logger = logging.getLogger(__name__)
@@ -46,8 +51,53 @@ PROJECTION_FILE="{file}.tif"
 OME_TIF_FILE="{file}.ome.tif"
 NUMBER_OF_Z_INDEX = None
 NUMBER_OF_CHANNELS = None
+PROCESSING_LOG = None
 
-
+def log_extract_scenes(status):
+    if PROCESSING_LOG != None:
+        try:
+            if 'hostname' in PROCESSING_LOG.keys():
+                client_id = PROCESSING_LOG['hostname']
+            else:
+                hostname = socket.gethostname()
+                if hostname == 'localhost':
+                    ip_addr = socket.gethostbyname(hostname)
+                    client_id=f'{ip_addr}' 
+                else:
+                    client_id=f'{hostname}' 
+            approach=PROCESSING_LOG['APPROACH'] 
+            batch_id=PROCESSING_LOG['BATCH_ID'] 
+            batch_size=PROCESSING_LOG['BATCH_SIZE'] 
+            run_number=PROCESSING_LOG['RUN_NUMBER'] 
+            processing_class=PROCESSING_LOG['PROCESSING_CLASS']
+            processing_name=PROCESSING_LOG['PROCESSING_NAME']
+            input_rid=PROCESSING_LOG['RID'] 
+            file_size=PROCESSING_LOG['FILE_SIZE'] 
+            args = ['python3', '/home/serban/db_logger.py', 
+                    '--input_rid', input_rid, 
+                    '--file_size', file_size, 
+                    '--approach', approach, 
+                    '--client_id', client_id, 
+                    '--batch_id', batch_id,
+                    '--batch_size', batch_size,
+                    '--run_number', run_number,
+                    '--processing_class', processing_class,
+                    '--processing_name', processing_name,
+                    '--status', f'{status}']
+            print(f'Running: {" ".join(args)}') 
+            p = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            stdoutdata, stderrdata = p.communicate()
+            returncode = p.returncode
+            if returncode != 0:
+                print(f'Can not log extract scenes for RID = "{input_rid}".\nstdoutdata: {stdoutdata.decode("utf-8")}\nstderrdata: {stderrdata}.decode("utf-8")\n') 
+            else:
+                print(f'Log for RID = "{input_rid}":\n{stdoutdata.decode("utf-8")}\n') 
+        except:
+            et, ev, tb = sys.exc_info()
+            print(f'Exception in log_extract_scenes: {str(ev)}') 
+            print(f'{"".join(traceback.format_exception(et, ev, tb))}')
+            pass
+        
 class OMETiff:
     """
     Class use to manipulate OME Tiff Metadata.
@@ -756,7 +806,7 @@ class OMETiff:
         :return:
         """
 
-
+        log_extract_scenes('in progress extract scenes generate zarr file')
         start_time = time.time()
         filename, _ext = os.path.splitext(os.path.basename(infile))
         zarr_file = f"{outdir}/{filename}.zarr"
@@ -886,6 +936,7 @@ def seadragon_tiffs(image_path, z_planes=None, delete_ome=False, compression='ZS
 
     # Create a non-ome tiff pyramid version of the file optimized for open sea dragon.
     # Now go through series.....
+    log_extract_scenes('in progress extract scenes create tiff pyramid')
     for series in ome_contents.series:
         # Pick the slice in the middle, if there is a Z stack and z_plane is  'middle'
         z_plane = int(math.ceil(series.SizeZ / 2) - 1) if z_planes == 'middle' else z_planes
@@ -1022,16 +1073,18 @@ def convert_to_ome_tiff(image_path):
 
     return ome_contents
 
-def run(imagefile, jpeg_quality=80, compression='jpeg', tile_size=1024, force_rgb=False, processing_dir=None, projection_type=None, pixel_type=None, convert2ome=False):
-    global TMPDIR, NUMBER_OF_Z_INDEX, NUMBER_OF_CHANNELS
+def run(imagefile, jpeg_quality=80, compression='jpeg', tile_size=1024, force_rgb=False, processing_dir=None, projection_type=None, pixel_type=None, convert2ome=False, processing_log=None):
+    global TMPDIR, NUMBER_OF_Z_INDEX, NUMBER_OF_CHANNELS, PROCESSING_LOG
     
     
     NUMBER_OF_Z_INDEX = None
     NUMBER_OF_CHANNELS = None
     OMETiff.OMETiffSeries.JPEG_QUALITY = jpeg_quality
     TMPDIR = processing_dir
+    PROCESSING_LOG = processing_log
     
     try:
+        log_extract_scenes('start')
         start_time = time.time()
         if projection_type != None:
             projection_ome_tiff(imagefile, projection_type, force_rgb=force_rgb, compression=compression, pixel_type=pixel_type, tile_size=tile_size)
@@ -1044,10 +1097,14 @@ def run(imagefile, jpeg_quality=80, compression='jpeg', tile_size=1024, force_rg
         print(f"  utime: {usage.ru_utime:.2f}")
         print(f"  stime: {usage.ru_stime:.2f}")
         print(f"  maxrss {usage.ru_maxrss / (2 ** 20 if platform.system() == 'Linux' else 2 ** 30):.2f}")
+        log_extract_scenes('success: extract scenes - completed')
+        log_extract_scenes('end')
         return 0
     except subprocess.CalledProcessError as r:
         print(r.cmd)
         print(r.stderr)
+        log_extract_scenes('error: extract scenes - failed')
+        log_extract_scenes('end')
         return 1
 
 def main():
