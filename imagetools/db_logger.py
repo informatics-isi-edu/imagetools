@@ -108,56 +108,9 @@ def main(input_rid,
 if __name__ == '__main__':
     """
     Execution: 
-    python3 db_logger.py --rid 3-9Z2P --file_size 201000000 --use_case spot_instance --client_id serban --uuid 59450 --processing 2d_image_processing --status "in_progress: extracted scenes"
-    log_extract_scenes('in progress extract scenes generate zarr file')
-    log_extract_scenes('in progress extract scenes get metadata')
-    log_extract_scenes('in progress extract scenes create tiff pyramid')
-    log_extract_scenes('extract scenes success')
-    log_extract_scenes('extract scenes error')
-    
-    file_size = row['Original_File_Bytes']
-    log_process_image(f'in progress image processing extract from hatrac')
-    log_process_image(f'in progress image processing convert2pyramid')
-    log_process_image(f'in progress image processing processTiffPyramids')
-    log_process_image(f'in progress image processing success')
-    log_process_image(f'in progress image processing error')
-    """
-    """
-    os.environ['RID'] = 'my_rid'
-    os.environ['FILE_SIZE'] = str(20000)
-    os.environ['APPROACH'] = 'batch'
-    os.environ['BATCH_ID'] = str(uuid.uuid1())
-    os.environ['BATCH_SIZE'] = str(20)
-    os.environ['RUN_NUMBER'] = str(1)
-    os.environ['PROCESSING_CLASS'] = 'small'
-    os.environ['processing_name'] = 'extract_scenes'
-
-    hostname = socket.gethostname()
-    ip_addr = socket.gethostbyname(hostname)
-    client_id=f'{hostname} : {ip_addr}' 
-    approach=os.getenv('APPROACH', None) 
-    batch_id=os.getenv('BATCH_ID', None) 
-    batch_size=os.getenv('BATCH_SIZE', None) 
-    run_number=os.getenv('RUN_NUMBER', None) 
-    processing_class=os.getenv('PROCESSING_CLASS', None)
-    processing_name=os.getenv('PROCESSING_NAME', None)
-    input_rid=os.getenv('RID', None) 
-    file_size=os.getenv('FILE_SIZE', None) 
-    status = 'in progress'
-    args = ['python3', '/home/serban/db_logger.py', 
-            '--input_rid', input_rid, 
-            '--file_size', file_size, 
-            '--approach', approach, 
-            '--client_id', client_id, 
-            '--batch_id', batch_id,
-            '--batch_size', batch_size,
-            '--run_number', run_number,
-            '--processing_class', processing_class,
-            '--processing_name', processing_name,
-            '--status', f'{status}']
-    print(json.dumps(args, indent=4))
-    print(f'Running: {" ".join(args)}') 
-    sys.exit(1)
+        python3 -m imagetools.db_logger --input_rid <IMAGE_RID> --file_size <FILE_SIZE> --approach <APPROACH> --client_id <CLIENT_ID> --batch_id <BATCH_ID> --batch_size <BATCH_SIZE> --run_number <RUN_NUMBER>  --processing_class <PROCESSING_CLASS> --processing_name <PROCESSING_NAME> --status <STATUS>
+    Example:
+        python3 -m imagetools.db_logger --input_rid 3-9Z2P --file_size 201000000 --approach batch --client_id my_client_id --batch_id S59450 --batch_size 20 --run_number 1  --processing_class small --processing_name extract_scenes --status "in_progress: extracted_scenes test"
     """
     parser = argparse.ArgumentParser(description='Tool to process Image Processing Logging.')
     parser.add_argument( '-r', '--input_rid', help='The RID of the image.', action='store', type=str, required=True)

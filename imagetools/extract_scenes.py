@@ -29,6 +29,7 @@ import traceback
 import getpass
 import socket
 
+from imagetools.batch_id import get_batch_id
 
 TMPDIR = None
 
@@ -56,15 +57,6 @@ PROCESSING_LOG = None
 def log_extract_scenes(status):
     if PROCESSING_LOG != None:
         try:
-            if 'hostname' in PROCESSING_LOG.keys():
-                client_id = PROCESSING_LOG['hostname']
-            else:
-                hostname = socket.gethostname()
-                if hostname == 'localhost':
-                    ip_addr = socket.gethostbyname(hostname)
-                    client_id=f'{ip_addr}' 
-                else:
-                    client_id=f'{hostname}' 
             approach=PROCESSING_LOG['APPROACH'] 
             batch_id=PROCESSING_LOG['BATCH_ID'] 
             batch_size=str(PROCESSING_LOG['BATCH_SIZE']) 
@@ -73,7 +65,10 @@ def log_extract_scenes(status):
             processing_name=PROCESSING_LOG['PROCESSING_NAME']
             input_rid=PROCESSING_LOG['RID'] 
             file_size=str(PROCESSING_LOG['FILE_SIZE']) 
-            args = ['python3', '/home/serban/db_logger.py', 
+            client_id=str(PROCESSING_LOG['CLIENT_ID']) 
+            args = ['python3', 
+                    '-m',
+                    'imagetools.db_logger',
                     '--input_rid', input_rid, 
                     '--file_size', file_size, 
                     '--approach', approach, 
@@ -1116,21 +1111,36 @@ def main():
     parser.add_argument( '--projection_type', action='store', type=str, help='Force the z projections. Valid values: min, max, mean.', default=None)
     parser.add_argument( '--processing_dir', action='store', type=str, help='The temporary directory for the image processing.', default=None)
     parser.add_argument( '--pixel_type', action='store', type=str, help='The type of the pixel. For example uint8.', default=None)
-    parser.add_argument( '-r', '--rid', help='The RID of the record.', action='store', type=str)
+    parser.add_argument( '-r', '--rid', help='The RID of the record.', action='store', type=str, default='None')
     parser.add_argument( '--use_case', help='The use case.', action='store', type=str, default='batch')
     parser.add_argument( '--batch_size', help='The size of the batch.', action='store', type=int, default=20)
     parser.add_argument( '--run_number', help='The number of the run.', action='store', type=int, default=1)
     parser.add_argument( '--processing_class', help='The processing class.', action='store', type=str, default='small')
+    parser.add_argument( '--batch_id', help='The processing batch id.', action='store', type=str, default=None)
     parser.add_argument( '--processing_name', help='The processing name.', action='store', type=str, default='extract_scenes')
+    parser.add_argument( '--hostname', help='The hostname where it is running.', action='store', type=str, default=None)
+    parser.add_argument( '--processing_log', help='Use the processing_log.', action='store', type=bool, default=False)
     
     args = parser.parse_args()
     processing_log = None
-    if args.rid != None:
+    if args.processing_log:
         processing_log = {}
         processing_log['RID'] = args.rid
-        processing_log['FILE_SIZE'] = file_size
+        processing_log['FILE_SIZE'] = os.stat(args.imagefile).st_size
         processing_log['APPROACH'] = args.use_case
-        processing_log['BATCH_ID'] = get_batch_id()
+        if args.batch_id != None:
+            processing_log['BATCH_ID'] = args.batch_id
+        else:
+            processing_log['BATCH_ID'] = get_batch_id()
+        if args.hostname != None:
+            processing_log['CLIENT_ID'] = args.hostname
+        else:
+            hostname = socket.gethostname()
+            if hostname == 'localhost':
+                ip_addr = socket.gethostbyname(hostname)
+                processing_log['CLIENT_ID'] = f'{ip_addr}'
+            else:
+                processing_log['CLIENT_ID'] = f'{hostname}'
         processing_log['BATCH_SIZE'] = args.batch_size
         processing_log['RUN_NUMBER'] = args.run_number
         processing_log['PROCESSING_CLASS'] = args.processing_class
@@ -1141,5 +1151,10 @@ def main():
 if __name__ == '__main__':
     logging.basicConfig(format=FORMAT)
     logger.setLevel(logging.INFO)
+    
+    """
+    Example of execution with processing_log:
+        extract_scenes 20170403-mKD15.5eWTSW-ER-133-00-1.czi --processing_log True --rid 16-QT6M --use_case batch --batch_size 10 --run_number 2 --processing_class small
+    """
     
     sys.exit(main())
