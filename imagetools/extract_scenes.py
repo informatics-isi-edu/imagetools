@@ -806,7 +806,7 @@ class OMETiff:
         :return:
         """
 
-        log_extract_scenes('in progress extract scenes generate zarr file')
+        log_extract_scenes('in_progress: extract_scenes - generate zarr file')
         start_time = time.time()
         filename, _ext = os.path.splitext(os.path.basename(infile))
         zarr_file = f"{outdir}/{filename}.zarr"
@@ -936,7 +936,7 @@ def seadragon_tiffs(image_path, z_planes=None, delete_ome=False, compression='ZS
 
     # Create a non-ome tiff pyramid version of the file optimized for open sea dragon.
     # Now go through series.....
-    log_extract_scenes('in progress extract scenes create tiff pyramid')
+    log_extract_scenes('in_progress: extract_scenes - create tiff pyramid')
     for series in ome_contents.series:
         # Pick the slice in the middle, if there is a Z stack and z_plane is  'middle'
         z_plane = int(math.ceil(series.SizeZ / 2) - 1) if z_planes == 'middle' else z_planes
@@ -1084,7 +1084,7 @@ def run(imagefile, jpeg_quality=80, compression='jpeg', tile_size=1024, force_rg
     PROCESSING_LOG = processing_log
     
     try:
-        log_extract_scenes('start')
+        log_extract_scenes('in_progress: extract_scenes - started')
         start_time = time.time()
         if projection_type != None:
             projection_ome_tiff(imagefile, projection_type, force_rgb=force_rgb, compression=compression, pixel_type=pixel_type, tile_size=tile_size)
@@ -1097,14 +1097,12 @@ def run(imagefile, jpeg_quality=80, compression='jpeg', tile_size=1024, force_rg
         print(f"  utime: {usage.ru_utime:.2f}")
         print(f"  stime: {usage.ru_stime:.2f}")
         print(f"  maxrss {usage.ru_maxrss / (2 ** 20 if platform.system() == 'Linux' else 2 ** 30):.2f}")
-        log_extract_scenes('success: extract scenes - completed')
-        log_extract_scenes('end')
+        log_extract_scenes('in_progress: extract_scenes - completed')
         return 0
     except subprocess.CalledProcessError as r:
         print(r.cmd)
         print(r.stderr)
-        log_extract_scenes('error: extract scenes - failed')
-        log_extract_scenes('end')
+        log_extract_scenes('in_progress: extract scenes - failed')
         return 1
 
 def main():
@@ -1118,9 +1116,27 @@ def main():
     parser.add_argument( '--projection_type', action='store', type=str, help='Force the z projections. Valid values: min, max, mean.', default=None)
     parser.add_argument( '--processing_dir', action='store', type=str, help='The temporary directory for the image processing.', default=None)
     parser.add_argument( '--pixel_type', action='store', type=str, help='The type of the pixel. For example uint8.', default=None)
-
+    parser.add_argument( '-r', '--rid', help='The RID of the record.', action='store', type=str)
+    parser.add_argument( '--use_case', help='The use case.', action='store', type=str, default='batch')
+    parser.add_argument( '--batch_size', help='The size of the batch.', action='store', type=int, default=20)
+    parser.add_argument( '--run_number', help='The number of the run.', action='store', type=int, default=1)
+    parser.add_argument( '--processing_class', help='The processing class.', action='store', type=str, default='small')
+    parser.add_argument( '--processing_name', help='The processing name.', action='store', type=str, default='extract_scenes')
+    
     args = parser.parse_args()
-    run(args.imagefile, jpeg_quality=args.jpeg_quality, compression=args.compression, tile_size=args.tile_size, force_rgb=args.force_rgb, processing_dir=args.processing_dir, projection_type=args.projection_type, pixel_type=args.pixel_type, convert2ome=args.convert2ome)
+    processing_log = None
+    if args.rid != None:
+        processing_log = {}
+        processing_log['RID'] = args.rid
+        processing_log['FILE_SIZE'] = file_size
+        processing_log['APPROACH'] = args.use_case
+        processing_log['BATCH_ID'] = get_batch_id()
+        processing_log['BATCH_SIZE'] = args.batch_size
+        processing_log['RUN_NUMBER'] = args.run_number
+        processing_log['PROCESSING_CLASS'] = args.processing_class
+        processing_log['PROCESSING_NAME'] = args.processing_name
+
+    run(args.imagefile, jpeg_quality=args.jpeg_quality, compression=args.compression, tile_size=args.tile_size, force_rgb=args.force_rgb, processing_dir=args.processing_dir, projection_type=args.projection_type, pixel_type=args.pixel_type, convert2ome=args.convert2ome, processing_log=processing_log)
 
 if __name__ == '__main__':
     logging.basicConfig(format=FORMAT)
