@@ -67,12 +67,12 @@ def log_extract_scenes(status):
                     client_id=f'{hostname}' 
             approach=PROCESSING_LOG['APPROACH'] 
             batch_id=PROCESSING_LOG['BATCH_ID'] 
-            batch_size=PROCESSING_LOG['BATCH_SIZE'] 
-            run_number=PROCESSING_LOG['RUN_NUMBER'] 
+            batch_size=str(PROCESSING_LOG['BATCH_SIZE']) 
+            run_number=str(PROCESSING_LOG['RUN_NUMBER']) 
             processing_class=PROCESSING_LOG['PROCESSING_CLASS']
             processing_name=PROCESSING_LOG['PROCESSING_NAME']
             input_rid=PROCESSING_LOG['RID'] 
-            file_size=PROCESSING_LOG['FILE_SIZE'] 
+            file_size=str(PROCESSING_LOG['FILE_SIZE']) 
             args = ['python3', '/home/serban/db_logger.py', 
                     '--input_rid', input_rid, 
                     '--file_size', file_size, 
