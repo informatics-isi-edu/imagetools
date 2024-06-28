@@ -75,6 +75,8 @@ class LoggerClient (object):
         #print(json.dumps(row, indent=4))
 
 def main(input_rid, 
+         host=None, 
+         catalog_number=None, 
          file_size=None, 
          approach=None, 
          client_id=None, 
@@ -86,8 +88,8 @@ def main(input_rid,
          status=None):
     try:
         credentials = get_credential('dev.derivacloud.org')
-        client = LoggerClient(host='dev.derivacloud.org', \
-                            catalog_number=83773, \
+        client = LoggerClient(host=host, \
+                            catalog_number=catalog_number, \
                             credentials=credentials, \
                             input_rid=input_rid, \
                             file_size=file_size, \
@@ -113,6 +115,8 @@ if __name__ == '__main__':
         python3 -m imagetools.db_logger --input_rid 3-9Z2P --file_size 201000000 --approach batch --client_id my_client_id --batch_id S59450 --batch_size 20 --run_number 1  --processing_class small --processing_name extract_scenes --status "in_progress: extracted_scenes test"
     """
     parser = argparse.ArgumentParser(description='Tool to process Image Processing Logging.')
+    parser.add_argument( '--host', help='The host where the processing_log table resides.', action='store', type=str, default='dev.derivacloud.org')
+    parser.add_argument( '--catalog_number', help='The catalog number where the processing_log table resides.', action='store', type=int, default=83773)
     parser.add_argument( '-r', '--input_rid', help='The RID of the image.', action='store', type=str, required=True)
     parser.add_argument( '--file_size', help='The file size.', action='store', type=int, required=True)
     parser.add_argument( '--approach', help='The use case (spot_instance, lamda_function, batch).', action='store', type=str, required=True)
@@ -125,6 +129,8 @@ if __name__ == '__main__':
     parser.add_argument( '--status', help='The processing status.', action='store', type=str, required=True)
     args = parser.parse_args()
     main(args.input_rid, 
+         host=args.host, 
+         catalog_number=args.catalog_number, 
          file_size=args.file_size, 
          approach=args.approach, 
          client_id=args.client_id, 

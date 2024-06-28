@@ -66,9 +66,13 @@ def log_extract_scenes(status):
             input_rid=PROCESSING_LOG['RID'] 
             file_size=str(PROCESSING_LOG['FILE_SIZE']) 
             client_id=str(PROCESSING_LOG['CLIENT_ID']) 
+            host=str(PROCESSING_LOG['HOST']) 
+            catalog_number=str(PROCESSING_LOG['CATALOG_NUMBER']) 
             args = ['python3', 
                     '-m',
                     'imagetools.db_logger',
+                    '--host', host, 
+                    '--catalog_number', catalog_number, 
                     '--input_rid', input_rid, 
                     '--file_size', file_size, 
                     '--approach', approach, 
@@ -1118,7 +1122,9 @@ def main():
     parser.add_argument( '--processing_class', help='The processing class. Default is small.', action='store', type=str, default='small')
     parser.add_argument( '--batch_id', help='The processing batch id. Default is None.', action='store', type=str, default=None)
     parser.add_argument( '--processing_name', help='The processing name. Default is extract_scenes.', action='store', type=str, default='extract_scenes')
-    parser.add_argument( '--hostname', help='The hostname where it is running. Default is None.', action='store', type=str, default=None)
+    parser.add_argument( '--client_id', help='The hostname where it is running. Default is None.', action='store', type=str, default=None)
+    parser.add_argument( '--host', help='The hostname where the processing_table resides. Default is dev.derivacloud.org.', action='store', type=str, default='dev.derivacloud.org')
+    parser.add_argument( '--catalog_number', help='The catalog number where the processing_table resides. Default is 83773.', action='store', type=int, default=83773)
     parser.add_argument( '--processing_log', help='Use the processing_log. Default is False.', action='store', type=bool, default=False)
     
     args = parser.parse_args()
@@ -1132,8 +1138,8 @@ def main():
             processing_log['BATCH_ID'] = args.batch_id
         else:
             processing_log['BATCH_ID'] = get_batch_id()
-        if args.hostname != None:
-            processing_log['CLIENT_ID'] = args.hostname
+        if args.client_id != None:
+            processing_log['CLIENT_ID'] = args.client_id
         else:
             hostname = socket.gethostname()
             if hostname == 'localhost':
@@ -1141,6 +1147,8 @@ def main():
                 processing_log['CLIENT_ID'] = f'{ip_addr}'
             else:
                 processing_log['CLIENT_ID'] = f'{hostname}'
+        processing_log['HOST'] = args.host
+        processing_log['CATALOG_NUMBER'] = args.catalog_number
         processing_log['BATCH_SIZE'] = args.batch_size
         processing_log['RUN_NUMBER'] = args.run_number
         processing_log['PROCESSING_CLASS'] = args.processing_class
