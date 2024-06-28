@@ -119,7 +119,7 @@ You can extract scenes by running the `extract_scenes` script:
 extract_scenes --help
 
 usage: extract_scenes [-h] [--jpeg_quality JPEG_QUALITY] [--compression COMPRESSION] [--tile_size TILE_SIZE] [--force_rgb FORCE_RGB] [--convert2ome CONVERT2OME] [--projection_type PROJECTION_TYPE] [--processing_dir PROCESSING_DIR] [--pixel_type PIXEL_TYPE] [-r RID] [--use_case USE_CASE]
-                      [--batch_size BATCH_SIZE] [--run_number RUN_NUMBER] [--processing_class PROCESSING_CLASS] [--batch_id BATCH_ID] [--processing_name PROCESSING_NAME] [--hostname HOSTNAME] [--processing_log PROCESSING_LOG]
+                      [--batch_size BATCH_SIZE] [--run_number RUN_NUMBER] [--processing_class PROCESSING_CLASS] [--batch_id BATCH_ID] [--processing_name PROCESSING_NAME] [--client_id CLIENT_ID] [--host HOST] [--catalog_number CATALOG_NUMBER] [--processing_log PROCESSING_LOG]
                       imagefile
 
 Tool to extract scenes from an image.
@@ -156,7 +156,11 @@ optional arguments:
   --batch_id BATCH_ID   The processing batch id. Default is None.
   --processing_name PROCESSING_NAME
                         The processing name. Default is extract_scenes.
-  --hostname HOSTNAME   The hostname where it is running. Default is None.
+  --client_id CLIENT_ID
+                        The hostname where it is running. Default is None.
+  --host HOST           The hostname where the processing_table resides. Default is dev.derivacloud.org.
+  --catalog_number CATALOG_NUMBER
+                        The catalog number where the processing_table resides. Default is 83773.
   --processing_log PROCESSING_LOG
                         Use the processing_log. Default is False.
 ```
