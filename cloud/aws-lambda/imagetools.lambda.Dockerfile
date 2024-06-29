@@ -1,6 +1,4 @@
 FROM fedora:38
-# FROM amazonlinux
-# FROM centos:latest
 
 RUN dnf install -y wget python3-pip unzip git bc blosc java-21-openjdk python3-lxml libtiff-tools && dnf clean all
 
@@ -22,17 +20,19 @@ COPY ./imagetools /imagetools
 WORKDIR /imagetools
 RUN pip3 install . && pip3 install awslambdaric && pip3 cache purge
 
+# Copy credentials - AWS provisioned containers run with the permissions of a default user named “sbx_user1051”
+RUN useradd -ms /bin/bash sbx_user1051 
+COPY ./imagetools/.deriva /home/sbx_user1051/.deriva
+# Copy lambda handler
 COPY ./imagetools/cloud/aws-lambda/lambda /lambda
 
-WORKDIR /
-
+# Passing relative Path of handler to awslambdaric causes path resolution issues, so we set PYTHONPATH to the location of the handler
+ENV PYTHONPATH /lambda
 ENV JAVA_HOME /etc/alternatives/jre
 
 # Since AWS Lambda has permission to only write in /tmp, we execute extract_scenes in /tmp
 WORKDIR /tmp
-
-# Passing relative Path of handler to awslambdaric causes path resolution issues, so we set PYTHONPATH to the location of the handler
-ENV PYTHONPATH /lambda
+USER sbx_user1051
 
 ENTRYPOINT [ "/usr/bin/python3", "-m", "awslambdaric" ]
 CMD ["lambda.handler"]
