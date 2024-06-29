@@ -1,7 +1,7 @@
 #!/usr/bin/python3
 
 import random
-_b32_symbols = list('0123456789ABCDEFGHJKMNPQRSTVWXYZ')
+_b32_symbols = list('0123456789abcdefghjkmnpqrstvwxyz')
 def urlb32_encode(i, zeropad=0):
     if not isinstance(i, int):
         raise TypeError('first input must be integer type')
@@ -14,7 +14,7 @@ def urlb32_encode(i, zeropad=0):
         output.extend([ '0' for i in range(zeropad - len(output)) ])
     output2 = []
     for idx in range(len(output)):
-        if idx > 0 and idx % 4 == 0:
+        if idx > 0 and idx % 3 == 0:
             output2.append('-')
         output2.append(output[idx])
     output2.reverse()
