@@ -18,6 +18,8 @@ import datetime
 import socket
 import uuid
 
+from atlas_d2k.utils.shared import session_config_write_retry
+
 class LoggerClient (object):
     """Logger client for the image processing.
     """
@@ -40,7 +42,8 @@ class LoggerClient (object):
             'https', 
             self.host,
             self.catalog_number,
-            self.credentials
+            self.credentials,
+            session_config=session_config_write_retry
         )
         self.catalog.dcctx['cid'] = 'pipeline/image_processing_logging'
 
