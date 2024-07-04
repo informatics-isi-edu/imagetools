@@ -1083,7 +1083,7 @@ def run(imagefile, jpeg_quality=80, compression='jpeg', tile_size=1024, force_rg
     PROCESSING_LOG = processing_log
     
     try:
-        log_extract_scenes('start|in_progress: extract_scenes - started')
+        log_extract_scenes('start: extract_scenes - started')
         start_time = time.time()
         if projection_type != None:
             projection_ome_tiff(imagefile, projection_type, force_rgb=force_rgb, compression=compression, pixel_type=pixel_type, tile_size=tile_size)
@@ -1096,12 +1096,12 @@ def run(imagefile, jpeg_quality=80, compression='jpeg', tile_size=1024, force_rg
         print(f"  utime: {usage.ru_utime:.2f}")
         print(f"  stime: {usage.ru_stime:.2f}")
         print(f"  maxrss {usage.ru_maxrss / (2 ** 20 if platform.system() == 'Linux' else 2 ** 30):.2f}")
-        log_extract_scenes('success|in_progress: extract_scenes - completed')
+        log_extract_scenes('success: extract_scenes - completed')
         return 0
     except subprocess.CalledProcessError as r:
         print(r.cmd)
         print(r.stderr)
-        log_extract_scenes('error|in_progress: extract scenes - failed')
+        log_extract_scenes('error: extract scenes - failed')
         return 1
 
 def main():
