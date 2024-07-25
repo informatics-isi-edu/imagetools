@@ -54,7 +54,7 @@ NUMBER_OF_Z_INDEX = None
 NUMBER_OF_CHANNELS = None
 PROCESSING_LOG = None
 
-def log_extract_scenes(status):
+def log_extract_scenes(status, resources):
     if PROCESSING_LOG != None:
         try:
             approach=PROCESSING_LOG['APPROACH'] 
@@ -83,6 +83,11 @@ def log_extract_scenes(status):
                     '--processing_class', processing_class,
                     '--processing_name', processing_name,
                     '--status', f'{status}']
+            
+            if resources is not None:
+                args.append('--resources')
+                args.append(json.dumps(resources))
+            
             print(f'Running: {" ".join(args)}') 
             p = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             stdoutdata, stderrdata = p.communicate()
@@ -805,7 +810,7 @@ class OMETiff:
         :return:
         """
 
-        log_extract_scenes('in_progress: extract_scenes - generate zarr file')
+        log_extract_scenes('in_progress: extract_scenes - generate zarr file', None)
         start_time = time.time()
         filename, _ext = os.path.splitext(os.path.basename(infile))
         zarr_file = f"{outdir}/{filename}.zarr"
@@ -935,7 +940,7 @@ def seadragon_tiffs(image_path, z_planes=None, delete_ome=False, compression='ZS
 
     # Create a non-ome tiff pyramid version of the file optimized for open sea dragon.
     # Now go through series.....
-    log_extract_scenes('in_progress: extract_scenes - create tiff pyramid')
+    log_extract_scenes('in_progress: extract_scenes - create tiff pyramid', None)
     for series in ome_contents.series:
         # Pick the slice in the middle, if there is a Z stack and z_plane is  'middle'
         z_plane = int(math.ceil(series.SizeZ / 2) - 1) if z_planes == 'middle' else z_planes
@@ -1083,8 +1088,11 @@ def run(imagefile, jpeg_quality=80, compression='jpeg', tile_size=1024, force_rg
     PROCESSING_LOG = processing_log
     
     try:
-        log_extract_scenes('start: extract_scenes - started')
+        if processing_log:
+            log_extract_scenes('start: extract_scenes - started', processing_log['RESOURCES'])
+            
         start_time = time.time()
+                
         if projection_type != None:
             projection_ome_tiff(imagefile, projection_type, force_rgb=force_rgb, compression=compression, pixel_type=pixel_type, tile_size=tile_size)
         elif convert2ome==True:
@@ -1096,12 +1104,23 @@ def run(imagefile, jpeg_quality=80, compression='jpeg', tile_size=1024, force_rg
         print(f"  utime: {usage.ru_utime:.2f}")
         print(f"  stime: {usage.ru_stime:.2f}")
         print(f"  maxrss {usage.ru_maxrss / (2 ** 20 if platform.system() == 'Linux' else 2 ** 30):.2f}")
-        log_extract_scenes('success: extract_scenes - completed')
+        
+        
+        if processing_log:
+            output_dir = os.path.basename(processing_log['IMAGEFILEPATH']).split('.')[0]
+            resources = None
+            
+            if os.path.exists(output_dir):
+                resources = {
+                    "disk_size" : subprocess.run(f'du -sh {output_dir}', shell=True, capture_output=True, text=True).stdout.split("\t")[0]
+                }
+            
+            log_extract_scenes('success: extract_scenes - completed', resources)
         return 0
     except subprocess.CalledProcessError as r:
         print(r.cmd)
         print(r.stderr)
-        log_extract_scenes('error: extract scenes - failed')
+        log_extract_scenes('error: extract scenes - failed', None)
         return 1
 
 def main():
@@ -1126,6 +1145,7 @@ def main():
     parser.add_argument( '--host', help='The hostname where the processing_table resides. Default is dev.derivacloud.org.', action='store', type=str, default='dev.derivacloud.org')
     parser.add_argument( '--catalog_number', help='The catalog number where the processing_table resides. Default is 83773.', action='store', type=int, default=83773)
     parser.add_argument( '--processing_log', help='Use the processing_log. Default is False.', action='store', type=bool, default=False)
+    parser.add_argument( '--resources', help='Resource information ex. CPU, Memory, Disk Size etc.', action='store', type=str, default=False)
     
     args = parser.parse_args()
     processing_log = None
@@ -1153,6 +1173,8 @@ def main():
         processing_log['RUN_NUMBER'] = args.run_number
         processing_log['PROCESSING_CLASS'] = args.processing_class
         processing_log['PROCESSING_NAME'] = args.processing_name
+        processing_log['RESOURCES'] = json.loads(args.resources) if args.resources else None
+        processing_log['IMAGEFILEPATH'] = args.imagefile
 
     run(args.imagefile, jpeg_quality=args.jpeg_quality, compression=args.compression, tile_size=args.tile_size, force_rgb=args.force_rgb, processing_dir=args.processing_dir, projection_type=args.projection_type, pixel_type=args.pixel_type, convert2ome=args.convert2ome, processing_log=processing_log)
 

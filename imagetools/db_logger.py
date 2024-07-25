@@ -38,6 +38,7 @@ class LoggerClient (object):
         self.processing_class = kwargs.get("processing_class")
         self.processing_name = kwargs.get("processing_name")
         self.status = kwargs.get("status")
+        self.resources = kwargs.get("resources")
         self.catalog = PollingErmrestCatalog(
             'https', 
             self.host,
@@ -50,6 +51,7 @@ class LoggerClient (object):
         print('Client initialized.')
         
         url = f'/entity/serverless:processing_log'
+        # url = f'/entity/serverless:processing_log_test'
         print(f'Query URL: {url}') 
         
         resp = self.catalog.get(url)
@@ -66,10 +68,12 @@ class LoggerClient (object):
             'run_number': self.run_number,
             'processing_class': self.processing_class,
             'processing_name': self.processing_name,
-            'status': self.status
+            'status': self.status,
         }
 
-        url = f'/entity/serverless:processing_log'
+        if self.resources is not None:
+            row['resources'] = json.loads(self.resources)
+        
         resp = self.catalog.post(
             url,
             json=[row]
@@ -88,9 +92,11 @@ def main(input_rid,
          run_number=None, 
          processing_class=None, 
          processing_name=None, 
-         status=None):
+         status=None,
+         resources=None):
     try:
-        credentials = get_credential('dev.derivacloud.org')
+        # credentials = get_credential('dev.derivacloud.org')
+        credentials = get_credential(host)
         client = LoggerClient(host=host, \
                             catalog_number=catalog_number, \
                             credentials=credentials, \
@@ -103,7 +109,8 @@ def main(input_rid,
                             run_number=run_number, \
                             processing_class=processing_class, \
                             processing_name=processing_name, \
-                            status=status)
+                            status=status, \
+                            resources=resources)
     except:
         et, ev, tb = sys.exc_info()
         print('got INIT exception "%s"' % str(ev))
@@ -130,6 +137,8 @@ if __name__ == '__main__':
     parser.add_argument( '--processing_class', help='The processing class: small, moderate, ....', action='store', type=str, required=True)
     parser.add_argument( '--processing_name', help='The processing name: extract scenes, 2d image processing, ....', action='store', type=str, required=True)
     parser.add_argument( '--status', help='The processing status.', action='store', type=str, required=True)
+    parser.add_argument( '--resources', help='Resource information ex. CPU, Memory, Disk Size etc.', action='store', type=str, required=False)
+    
     args = parser.parse_args()
     main(args.input_rid, 
          host=args.host, 
@@ -142,4 +151,5 @@ if __name__ == '__main__':
          run_number=args.run_number, 
          processing_class=args.processing_class, 
          processing_name=args.processing_name, 
-         status=args.status)
+         status=args.status,
+         resources= args.resources)
