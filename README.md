@@ -10,6 +10,7 @@ raw2ometiff (https://github.com/glencoesoftware/raw2ometiff)
 ## Prerequisites
 
  - Get the latest `bioformats2raw` and `bftools` applications. For example:
+   - Note: For mac users, `curl` can be used instead of `wget` 
 
 ```
 wget https://github.com/glencoesoftware/bioformats2raw/releases/download/v0.3.0/bioformats2raw-0.3.0.zip
@@ -34,7 +35,7 @@ ln -s /usr/local/share/applications/bioformats2raw-0.3.0/bin/bioformats2raw  bio
 ln -s /usr/local/share/applications/bftools bftools
 ln -s /usr/local/share/applications/bftools/bfconvert bfconvert
 ln -s /usr/local/share/applications/bftools/showinf showinf
-ln -s /usr/local/share/applications/raw2ometiff-0.3.1/bin/raw2ometiff  bioformats2raw
+ln -s /usr/local/share/applications/raw2ometiff-0.3.1/bin/raw2ometiff  raw2ometiff
 ```
 
  - Install Python packages:
