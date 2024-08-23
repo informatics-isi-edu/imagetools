@@ -1108,6 +1108,7 @@ def run(imagefile, jpeg_quality=80, compression='jpeg', tile_size=1024, force_rg
         
         if processing_log:
             output_dir = os.path.basename(processing_log['IMAGEFILEPATH']).split('.')[0]
+            print(f"Output dir - {output_dir}")
             resources = None
             
             if os.path.exists(output_dir):
@@ -1137,7 +1138,7 @@ def main():
     parser.add_argument( '-r', '--rid', help='The RID of the record. Default is None.', action='store', type=str, default=None)
     parser.add_argument( '--use_case', help='The use case. Default is batch.', action='store', type=str, default='batch')
     parser.add_argument( '--batch_size', help='The size of the batch. Default is 20.', action='store', type=int, default=20)
-    parser.add_argument( '--run_number', help='The number of the run. Default is 1.', action='store', type=int, default=1)
+    parser.add_argument( '--run_number', help='The number of the run. Default is 1.', action='store', type=str, default=1)
     parser.add_argument( '--processing_class', help='The processing class. Default is small.', action='store', type=str, default='small')
     parser.add_argument( '--batch_id', help='The processing batch id. Default is None.', action='store', type=str, default=None)
     parser.add_argument( '--processing_name', help='The processing name. Default is extract_scenes.', action='store', type=str, default='extract_scenes')

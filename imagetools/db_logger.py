@@ -133,7 +133,7 @@ if __name__ == '__main__':
     parser.add_argument( '--client_id', help='The user name.', action='store', type=str, required=True)
     parser.add_argument( '--batch_id', help='The UUID.', action='store', type=str, required=True)
     parser.add_argument( '--batch_size', help='The batch size.', action='store', type=int, required=True)
-    parser.add_argument( '--run_number', help='The run number in the batch.', action='store', type=int, required=True)
+    parser.add_argument( '--run_number', help='The run number in the batch.', action='store', type=str, required=True)
     parser.add_argument( '--processing_class', help='The processing class: small, moderate, ....', action='store', type=str, required=True)
     parser.add_argument( '--processing_name', help='The processing name: extract scenes, 2d image processing, ....', action='store', type=str, required=True)
     parser.add_argument( '--status', help='The processing status.', action='store', type=str, required=True)
