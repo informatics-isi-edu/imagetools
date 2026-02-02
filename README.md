@@ -95,23 +95,24 @@ Tool to extract scenes from an image.
 positional arguments:
   imagefile             The image file to extract scenes from.
 
-optional arguments:
+options:
   -h, --help            show this help message and exit
   --jpeg_quality JPEG_QUALITY
-                        The compression quality
+                        The compression quality (default: 80)
   --compression COMPRESSION
-                        The compression algorithm to use in generated file
+                        The compression algorithm to use (default: jpeg)
   --tile_size TILE_SIZE
-                        The size of the generated tiles
+                        The size of the generated tiles (default: 1024)
   --force_rgb FORCE_RGB
-                        Force generating the RGB channels.
+                        Force generating the RGB channels
+  --convert2ome CONVERT2OME
+                        Convert to standard OME-TIFF format
   --projection_type PROJECTION_TYPE
-                        Get the z projection for the specified PROJECTION_TYPE.
-                        Valid values for the PROJECTION_TYPE are min, max and mean.
+                        Generate Z projection. Valid values: min, max, mean
   --processing_dir PROCESSING_DIR
-                        The temporary directory for the image processing.
+                        The temporary directory for the image processing
   --pixel_type PIXEL_TYPE
-                        The type of the pixel. For example uint8.
+                        The output pixel type (e.g., uint8)
 ```
 
 ### Examples
@@ -136,14 +137,46 @@ extract_scenes --projection_type min --pixel_type uint8 --tile_size 512 image.oi
 ```python
 from imagetools import extract_scenes
 
-extract_scenes.run(<imagefile>)
+extract_scenes.run("image.oir")
+extract_scenes.run("image.oir", projection_type="max", pixel_type="uint8")
 ```
 
 The `extract_scenes.run` function signature:
 
 ```python
-def run(imagefile, jpeg_quality=80, compression='jpeg', tile_size=1024, force_rgb=False, processing_dir=None):
+def run(
+    imagefile: str,
+    jpeg_quality: int = 80,
+    compression: str = 'jpeg',
+    tile_size: int = 1024,
+    force_rgb: bool = False,
+    processing_dir: Optional[str] = None,
+    projection_type: Optional[str] = None,  # 'min', 'max', or 'mean'
+    pixel_type: Optional[str] = None,       # 'uint8' or 'uint16'
+    convert2ome: bool = False
+) -> int:
 ```
+
+## Other Tools
+
+Additional CLI tools are available:
+
+```bash
+# Consolidate companion OME-TIFF files into a single file
+consolidate_companion image.companion.ome
+
+# Convert TIFF to pyramid format (requires pyvips)
+convert_pyramid image.tif
+
+# Extract SVG annotations from QuPath
+qupath_svg annotations.geojson
+```
+
+## Example Files
+
+The `examples/` directory contains sample files for testing:
+
+- `testimage.oir` - Sample Olympus OIR microscopy image
 
 ## License
 
