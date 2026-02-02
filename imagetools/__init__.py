@@ -17,14 +17,8 @@ Example:
 
 from imagetools import extract_scenes
 from imagetools import consolidate_companion
+from imagetools import convert_pyramid
 from imagetools import qupath_svg
-
-# convert_pyramid requires optional pyvips dependency - import lazily
-def __getattr__(name: str):
-    if name == "convert_pyramid":
-        from imagetools import convert_pyramid
-        return convert_pyramid
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __version__ = "0.1.0"
 __all__ = [

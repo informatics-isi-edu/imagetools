@@ -44,11 +44,12 @@ import uuid
 from typing import Any, Optional
 
 import numpy as np
+import pyvips
 import skimage
 import skimage.exposure
 import xmltodict
 import zarr
-from tifffile import TiffFile, TiffWriter, imwrite
+from tifffile import TiffFile
 import xml.etree.ElementTree as ET
 
 # Global temporary directory for intermediate files
@@ -349,8 +350,8 @@ class OMETiff:
             """Create an IIIF-compatible TIFF file for a single image plane.
 
             Generates a new TIFF file consisting of a single image plane with
-            appropriate OME metadata. Uses the IIIF pyramid format (series of
-            images) rather than SubIFD format used by OME.
+            appropriate OME metadata. Uses pyvips for memory-efficient tile-based
+            processing of large images.
 
             Args:
                 filename: Base name of the output file.
@@ -367,84 +368,135 @@ class OMETiff:
 
             log_memory(f'generate_iiif_tiff start (s={self.Number}, z={z}, c={channel_number})')
 
-            # Compute pyramid levels to get ~1K pixels at top level
-            resolutions = int(math.log2(max(self.SizeX, self.SizeY)) - 9) if resolutions is None else resolutions
-            image_size = self.SizeX * self.SizeY * self.SizeC / (2 ** 20 if platform.system() == 'Linux' else 2 ** 30)
-            logger.info(
-                f'generating iiif tiff with {resolutions} levels: z:{z} C:{channel_number} size: {image_size:.2f} GiB')
+            # Prepare OME-XML metadata
+            iiif_omexml = self.iiif_omexml(z, channel_number)
+            iiif_pixels = iiif_omexml.getroot().find('.//ome:Pixels', self.ns)
 
-            with TiffWriter(outfile, bigtiff=True) as tiff_out:
-                # Set up compression and metadata options
-                options: dict[str, Any] = dict(
-                    tile=(tile_size, tile_size),
-                    compression='jpeg' if compression.lower() == 'jpeg' else compression,
-                    compressionargs={'level': self.JPEG_QUALITY} if compression.lower() == 'jpeg' else None,
-                    description=f"Single image plane from {filename}",
-                    metadata=None
-                )
-                physical_size = self.PhysicalSize
-                if physical_size is not None:
-                    options['resolution'] = (round(1 / physical_size[0]), round(1 / physical_size[1]), 'CENTIMETER')
+            # Get zarr array info
+            zarr_arr = self.zarr_series['0']
+            height, width = self.SizeY, self.SizeX
+            chunk_h, chunk_w = zarr_arr.chunks[-2], zarr_arr.chunks[-1]
 
-                iiif_omexml = self.iiif_omexml(z, channel_number)
-                iiif_pixels = iiif_omexml.getroot().find('.//ome:Pixels', self.ns)
+            image_size_gb = height * width * (3 if self.RGB else 1) / (1024 ** 3)
+            logger.info(f'generating iiif tiff: z:{z} C:{channel_number} size: {width}x{height} ({image_size_gb:.2f} GB)')
 
-                # Default Zarr ordering is TCZYX, select specified Z plane (T=0)
-                if self.RGB or self.Thumbnail:
-                    image = self.zarr_series['0'][0, :, z, :, :]
+            # Build pyvips image from zarr tiles for memory efficiency
+            log_memory('before tile-based image loading')
+
+            # Determine number of bands and format
+            if self.RGB or self.Thumbnail:
+                bands = 3
+                interpretation = 'srgb'
+            else:
+                bands = 1
+                interpretation = 'b-w'
+
+            # Calculate tile grid
+            n_tiles_y = (height + chunk_h - 1) // chunk_h
+            n_tiles_x = (width + chunk_w - 1) // chunk_w
+            logger.info(f'processing {n_tiles_y}x{n_tiles_x} = {n_tiles_y * n_tiles_x} tiles')
+
+            # Process tiles row by row for memory efficiency
+            row_images = []
+            for ty in range(n_tiles_y):
+                col_images = []
+                for tx in range(n_tiles_x):
+                    # Calculate tile bounds
+                    y0 = ty * chunk_h
+                    y1 = min(y0 + chunk_h, height)
+                    x0 = tx * chunk_w
+                    x1 = min(x0 + chunk_w, width)
+                    tile_h, tile_w = y1 - y0, x1 - x0
+
+                    # Load tile from zarr (TCZYX format)
+                    if self.RGB or self.Thumbnail:
+                        tile = zarr_arr[0, :, z, y0:y1, x0:x1]  # (3, h, w)
+                        tile = np.moveaxis(tile, 0, -1)  # (h, w, 3)
+                    else:
+                        tile = zarr_arr[0, channel_number, z, y0:y1, x0:x1]  # (h, w)
+
+                    # Convert uint16 to uint8 if needed
+                    if compression == 'jpeg' and self.Type == 'uint16':
+                        tile = skimage.exposure.equalize_hist(tile)
+                        tile = skimage.util.img_as_ubyte(tile)
+
+                    # Ensure contiguous array for pyvips
+                    tile = np.ascontiguousarray(tile)
+
+                    # Create pyvips image from tile
+                    if tile.ndim == 2:
+                        vips_tile = pyvips.Image.new_from_memory(
+                            tile.data, tile_w, tile_h, 1, 'uchar'
+                        )
+                    else:
+                        vips_tile = pyvips.Image.new_from_memory(
+                            tile.data, tile_w, tile_h, tile.shape[2], 'uchar'
+                        )
+
+                    col_images.append(vips_tile)
+
+                # Join tiles in this row
+                if len(col_images) == 1:
+                    row_img = col_images[0]
                 else:
-                    image = self.zarr_series['0'][0, channel_number, z, :, :]
+                    row_img = pyvips.Image.arrayjoin(col_images, across=len(col_images))
+                row_images.append(row_img)
 
-                log_memory(f'after loading image from zarr (shape={image.shape}, dtype={image.dtype}, nbytes={image.nbytes / (1024**2):.1f} MiB)')
+                # Log progress
+                if (ty + 1) % 5 == 0 or ty == n_tiles_y - 1:
+                    log_memory(f'processed row {ty + 1}/{n_tiles_y}')
 
-                # Convert 16-bit to 8-bit if using JPEG compression
-                if compression == 'jpeg' and self.Type == 'uint16':
-                    logger.info(f'Converting from uint16 to uint8')
-                    log_memory('before uint16 to uint8 conversion')
-                    histogram, bins = skimage.exposure.histogram(image)
-                    image = skimage.exposure.equalize_hist(image)
-                    image = skimage.util.img_as_ubyte(image)
-                    options.update({'photometric': 'MINISBLACK'})
-                    iiif_pixels.set('Type', 'uint8')
-                    iiif_pixels.set('SignificantBits', '8')
-                    self.ome_mods['Type'] = 'uint8'
-                    self.ome_mods['SignificantBits'] = '8'
-                    histogram, bins = skimage.exposure.histogram(image)
-                    self.Channels[channel_number]['Intensity_Histogram'] = histogram.tolist()
-                    log_memory(f'after uint16 to uint8 conversion (shape={image.shape}, dtype={image.dtype})')
-                    gc.collect()
-                    log_memory('after gc.collect()')
+            # Join all rows vertically
+            if len(row_images) == 1:
+                vips_image = row_images[0]
+            else:
+                vips_image = pyvips.Image.arrayjoin(row_images, across=1)
 
-                # Convert RGB to interleaved format for downstream tools
-                if self.RGB:
-                    logger.info(f'interleaving RGB....{image.shape}')
-                    log_memory('before RGB interleaving')
-                    image = np.moveaxis(image, 0, -1)
-                    options.update({'photometric': 'RGB', 'planarconfig': 'CONTIG'})
-                    iiif_pixels.attrib['Interleaved'] = "true"
-                    self.ome_mods['Interleaved'] = 'true'
-                    if not self.Thumbnail:
-                        value_image = skimage.color.rgb2hsv(image)[:, :, 2]
-                        histogram = skimage.exposure.histogram(value_image, nbins=256)[0]
-                        self.Channels[channel_number]['Intensity_Histogram'] = histogram.tolist()
-                        del value_image
-                    log_memory(f'after RGB interleaving (shape={image.shape})')
+            log_memory('after building pyvips image from tiles')
 
-                logger.info(f'writing base image....{image.shape}')
-                log_memory('before writing TIFF')
-                # Write base image and pyramid levels (subsampling consistent with Bio-Formats)
-                tiff_out.write(image, **options)
-                logger.info(f'writing pyramid with {resolutions} levels ....')
-                for i in range(1, resolutions):
-                    tiff_out.write(image[::2 ** i, ::2 ** i], subfiletype=1, **options)
-                log_memory('after writing TIFF')
+            # Update OME-XML for format changes
+            if compression == 'jpeg' and self.Type == 'uint16':
+                iiif_pixels.set('Type', 'uint8')
+                iiif_pixels.set('SignificantBits', '8')
+                self.ome_mods['Type'] = 'uint8'
+                self.ome_mods['SignificantBits'] = '8'
 
-            # Explicitly free image memory
-            del image
+            if self.RGB:
+                iiif_pixels.attrib['Interleaved'] = "true"
+                self.ome_mods['Interleaved'] = 'true'
+
+            # Set up pyvips write options
+            write_options = {
+                'tile': True,
+                'tile_width': tile_size,
+                'tile_height': tile_size,
+                'pyramid': True,
+                'bigtiff': True,
+                'compression': 'jpeg' if compression.lower() == 'jpeg' else compression,
+                'properties': True,  # Write placeholder for OME-XML
+            }
+            if compression.lower() == 'jpeg':
+                write_options['Q'] = self.JPEG_QUALITY
+
+            # Add resolution metadata if available
+            physical_size = self.PhysicalSize
+            if physical_size is not None:
+                # pyvips uses pixels per mm, we have cm
+                xres = round(10 / physical_size[0])  # Convert cm to mm
+                yres = round(10 / physical_size[1])
+                vips_image = vips_image.copy(xres=xres, yres=yres)
+
+            logger.info(f'writing pyramidal TIFF with pyvips...')
+            log_memory('before pyvips write')
+            vips_image.tiffsave(outfile, **write_options)
+            log_memory('after pyvips write')
+
+            # Clean up
+            del vips_image, row_images
             gc.collect()
-            log_memory('after del image and gc.collect()')
+            log_memory('after cleanup')
 
-            # Add OMEXML data (requires separate call due to unicode encoding)
+            # Add OME-XML data (requires separate call due to unicode encoding)
             set_omexml(outfile, iiif_omexml)
 
             # Log performance metrics
@@ -823,110 +875,96 @@ class OMETiff:
 
         outfile = PROJECTION_FILE.format(file=filename)
 
-        with open(outfile, 'wb') as imout:
-            for series in self.series:
-                iiif_omexml = series.iiif_omexml(0, 0)
-                iiif_pixels = iiif_omexml.getroot().find('.//ome:Pixels', series.ns)
-                resolutions = int(math.log2(max(series.SizeX, series.SizeY)) - 9) if resolutions is None else resolutions
+        for series in self.series:
+            iiif_omexml = series.iiif_omexml(0, 0)
+            iiif_pixels = iiif_omexml.getroot().find('.//ome:Pixels', series.ns)
 
-                # Clean up channel metadata (remove @ prefix from keys)
-                channels = metadata['OME']['Image']['Pixels']['Channel']
-                if type(channels) == dict:
-                    channels = [channels]
-                metadata_channels = []
-                index = 0
-                for channel in channels:
-                    channel = {k[1:] if k[0] == '@' else k: v for k, v in channel.items()}
-                    if index == channel_number:
-                        metadata_channels.append(channel)
-                    else:
-                        index += 1
+            image = series.projection
+            logger.info(f'projection image shape: {image.shape}')
 
-                # Build metadata options
-                options: dict[str, Any] = dict(metadata={
-                    'PhysicalSizeX': metadata['OME']['Image']['Pixels']['@PhysicalSizeX'],
-                    'PhysicalSizeXUnit': metadata['OME']['Image']['Pixels']['@PhysicalSizeXUnit'],
-                    'PhysicalSizeY': metadata['OME']['Image']['Pixels']['@PhysicalSizeY'],
-                    'PhysicalSizeYUnit': metadata['OME']['Image']['Pixels']['@PhysicalSizeYUnit'],
-                    'PhysicalSizeZ': metadata['OME']['Image']['Pixels']['@PhysicalSizeZ'],
-                    'PhysicalSizeZUnit': metadata['OME']['Image']['Pixels']['@PhysicalSizeZUnit'],
-                    'BigEndian': metadata['OME']['Image']['Pixels']['@BigEndian'],
-                    'SignificantBits': metadata['OME']['Image']['Pixels']['@SignificantBits'],
-                    'Type': metadata['OME']['Image']['Pixels']['@Type'],
-                    'AcquisitionDate': metadata['OME']['Image']['AcquisitionDate'],
-                    'axes': 'CZYX',
-                    'Channel': metadata_channels
-                })
+            # Remove extra dimensions if present (projection is 1, 1, Y, X)
+            while image.ndim > 2 and image.shape[0] == 1:
+                image = image[0]
+            if image.ndim > 2 and image.shape[0] == 1:
+                image = image[0]
 
-                image = series.projection
-                logger.info(f'checking base image....{image.shape}')
+            # Convert 16-bit to 8-bit for JPEG
+            if compression == 'jpeg' and series.Type == 'uint16':
+                logger.info(f'Converting from uint16 to uint8')
+                log_memory('before projection uint16 to uint8 conversion')
+                image = skimage.exposure.equalize_hist(image)
+                image = skimage.util.img_as_ubyte(image)
+                iiif_pixels.set('Type', 'uint8')
+                iiif_pixels.set('SignificantBits', '8')
+                series.ome_mods['Type'] = 'uint8'
+                series.ome_mods['SignificantBits'] = '8'
+                histogram = skimage.exposure.histogram(image)[0]
+                series.Channels[0]['Intensity_Histogram'] = histogram.tolist()
+                log_memory(f'after projection uint16 to uint8 (shape={image.shape}, dtype={image.dtype})')
 
-                if pixel_type == 'uint8' or series.RGB:
-                    options.update({
-                        'compression': 'jpeg' if compression.lower() == 'jpeg' else compression,
-                        'compressionargs': {'level': series.JPEG_QUALITY} if compression.lower() == 'jpeg' else None
-                    })
-                    physical_size = series.PhysicalSize
-                    if physical_size is not None:
-                        options['resolution'] = (round(1 / physical_size[0]), round(1 / physical_size[1]), 'CENTIMETER')
+            # Handle RGB interleaving
+            if series.RGB and image.ndim == 3:
+                logger.info(f'interleaving RGB....{image.shape}')
+                image = np.moveaxis(image, 0, -1)
+                series.ome_mods['Interleaved'] = 'true'
 
-                    # Convert 16-bit to 8-bit for JPEG
-                    if compression == 'jpeg' and series.Type == 'uint16':
-                        logger.info(f'Converting from uint16 to uint8')
-                        log_memory('before projection uint16 to uint8 conversion')
-                        histogram, bins = skimage.exposure.histogram(image)
-                        image = skimage.exposure.equalize_hist(image)
-                        image = skimage.util.img_as_ubyte(image)
-                        options.update({'photometric': 'MINISBLACK'})
-                        iiif_pixels.set('Type', 'uint8')
-                        iiif_pixels.set('SignificantBits', '8')
-                        series.ome_mods['Type'] = 'uint8'
-                        series.ome_mods['SignificantBits'] = '8'
-                        histogram, bins = skimage.exposure.histogram(image)
-                        series.Channels[0]['Intensity_Histogram'] = histogram.tolist()
-                        logger.info(f'writing image shape after uint16 to uint8 ....{image.shape}')
-                        log_memory(f'after projection uint16 to uint8 (shape={image.shape}, dtype={image.dtype})')
-                        gc.collect()
-                        log_memory('after gc.collect()')
+            # Ensure contiguous array
+            image = np.ascontiguousarray(image)
 
-                    # Handle RGB interleaving
-                    if series.RGB:
-                        logger.info(f'interleaving RGB....{image.shape}')
-                        log_memory('before projection RGB interleaving')
-                        image = np.moveaxis(image, 0, -1)
-                        options.update({'photometric': 'RGB', 'planarconfig': 'CONTIG'})
-                        options['metadata']['axes'] = 'YXS'
-                        options['metadata']['Plane'] = {'PositionX': [0.0], 'PositionXUnit': ['µm']}
-                        series.ome_mods['Interleaved'] = 'true'
-                        if not series.Thumbnail:
-                            value_image = skimage.color.rgb2hsv(image)[:, :, 2]
-                            histogram = skimage.exposure.histogram(value_image, nbins=256)[0]
-                            series.Channels[0]['Intensity_Histogram'] = histogram.tolist()
-                            del value_image
-                        logger.info(f'writing image shape after RGB ....{image.shape}')
-                        log_memory(f'after projection RGB interleaving (shape={image.shape})')
+            # Determine bands for pyvips
+            if image.ndim == 2:
+                bands = 1
+                height, width = image.shape
+            else:
+                height, width, bands = image.shape
 
-                    logger.info(f'writing base image....{image.shape}')
-                    logger.info(f'image dtype: {image.dtype}')
-                    logger.info(f'image ndim: {image.ndim}')
-                    imwrite(imout, image, **options)
-                else:
-                    logger.info(f'writing unchanged base image....{image.shape}')
-                    imwrite(
-                        imout,
-                        image,
-                        resolution=(1e4 / float(iiif_pixels.get('PhysicalSizeX')),
-                                   1e4 / float(iiif_pixels.get('PhysicalSizeY'))),
-                        **options
-                    )
+            # Determine format string for pyvips
+            if image.dtype == np.uint8:
+                vips_format = 'uchar'
+            elif image.dtype == np.uint16:
+                vips_format = 'ushort'
+            else:
+                vips_format = 'uchar'
 
-                # Free projection data immediately after writing each series
-                del image
-                if series.projection is not None:
-                    del series.projection
-                    series.projection = None
-                gc.collect()
-                log_memory(f'after freeing series {series.Number} projection data')
+            logger.info(f'creating pyvips image: {width}x{height}x{bands} {vips_format}')
+
+            # Create pyvips image
+            vips_image = pyvips.Image.new_from_memory(
+                image.data, width, height, bands, vips_format
+            )
+
+            # Add resolution metadata if available
+            physical_size = series.PhysicalSize
+            if physical_size is not None:
+                xres = round(10 / physical_size[0])
+                yres = round(10 / physical_size[1])
+                vips_image = vips_image.copy(xres=xres, yres=yres)
+
+            # Set up write options
+            write_options = {
+                'tile': True,
+                'tile_width': tile_size,
+                'tile_height': tile_size,
+                'pyramid': True,
+                'bigtiff': True,
+                'compression': 'jpeg' if compression.lower() == 'jpeg' else compression,
+                'properties': True,  # Write placeholder for OME-XML
+            }
+            if compression.lower() == 'jpeg':
+                write_options['Q'] = series.JPEG_QUALITY
+
+            logger.info(f'writing projection TIFF with pyvips...')
+            log_memory('before pyvips projection write')
+            vips_image.tiffsave(outfile, **write_options)
+            log_memory('after pyvips projection write')
+
+            # Free projection data immediately after writing each series
+            del image, vips_image
+            if series.projection is not None:
+                del series.projection
+                series.projection = None
+            gc.collect()
+            log_memory(f'after freeing series {series.Number} projection data')
 
         # Write projection metadata
         with open(f'{outdir}/PROJECTION.ome.xml', 'w') as metadata_file:
@@ -1477,16 +1515,53 @@ def convert_to_ome_tiff(image_path: str) -> OMETiff:
         'Channel': metadata_channels
     })
 
-    with open(outfile, 'wb') as imout:
-        for series in ome_contents.series:
-            log_memory(f'convert_to_ome_tiff: loading series {series.Number}')
-            image = series.zarr_series['0'][0, :, :, :, :]
-            logger.info(f'image.shape: {image.shape}')
-            log_memory(f'after loading image (shape={image.shape}, nbytes={image.nbytes / (1024**2):.1f} MiB)')
-            imwrite(imout, image, **options)
-            del image
-            gc.collect()
-            log_memory(f'after writing series {series.Number} and gc.collect()')
+    for series in ome_contents.series:
+        log_memory(f'convert_to_ome_tiff: loading series {series.Number}')
+        image = series.zarr_series['0'][0, :, :, :, :]
+        logger.info(f'image.shape: {image.shape}')
+        log_memory(f'after loading image (shape={image.shape}, nbytes={image.nbytes / (1024**2):.1f} MiB)')
+
+        # Reshape for pyvips: (C, Z, Y, X) -> (Y, X) or (Y, X, C)
+        if image.ndim == 4:
+            # Assuming CZYX, take first Z if multiple
+            if image.shape[1] > 1:
+                logger.warning(f'Multiple Z planes ({image.shape[1]}), taking first')
+            image = image[:, 0, :, :]  # Now (C, Y, X)
+            if image.shape[0] > 1:
+                image = np.moveaxis(image, 0, -1)  # (Y, X, C)
+            else:
+                image = image[0]  # (Y, X)
+
+        image = np.ascontiguousarray(image)
+
+        # Determine format
+        if image.ndim == 2:
+            height, width = image.shape
+            bands = 1
+        else:
+            height, width, bands = image.shape
+
+        vips_format = 'uchar' if image.dtype == np.uint8 else 'ushort'
+
+        vips_image = pyvips.Image.new_from_memory(
+            image.data, width, height, bands, vips_format
+        )
+
+        write_options = {
+            'tile': True,
+            'tile_width': 256,
+            'tile_height': 256,
+            'pyramid': True,
+            'bigtiff': True,
+            'properties': True,  # Write placeholder for OME-XML
+        }
+
+        logger.info(f'writing OME-TIFF with pyvips...')
+        vips_image.tiffsave(outfile, **write_options)
+
+        del image, vips_image
+        gc.collect()
+        log_memory(f'after writing series {series.Number} and gc.collect()')
 
     log_memory('convert_to_ome_tiff complete')
     return ome_contents

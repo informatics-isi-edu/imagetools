@@ -25,10 +25,8 @@ dependencies = [
     "scikit-image",
     "imagecodecs",
     "tifffile",
+    "pyvips>=2.2.0",
 ]
-
-[project.optional-dependencies]
-pyvips = ["pyvips"]
 
 [project.urls]
 Homepage = "https://github.com/informatics-isi-edu/imagetools"

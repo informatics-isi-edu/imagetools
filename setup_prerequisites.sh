@@ -163,6 +163,44 @@ install_blosc() {
 
 install_blosc
 
+# Check and install vips library (required by pyvips for image processing)
+install_vips() {
+    if [ "$(uname)" == "Darwin" ]; then
+        # macOS - use Homebrew
+        if command -v brew &> /dev/null; then
+            if ! brew list vips &> /dev/null; then
+                info "Installing vips via Homebrew..."
+                brew install vips
+            else
+                info "vips already installed via Homebrew"
+            fi
+        else
+            warn "Homebrew not found. Please install vips manually:"
+            warn "  brew install vips"
+        fi
+    elif [ -f /etc/redhat-release ]; then
+        # RHEL/Fedora/CentOS
+        if ! rpm -q vips &> /dev/null 2>&1; then
+            info "Installing vips via dnf..."
+            sudo dnf install -y vips vips-devel
+        else
+            info "vips already installed"
+        fi
+    elif [ -f /etc/debian_version ]; then
+        # Debian/Ubuntu
+        if ! dpkg -l libvips42 &> /dev/null 2>&1; then
+            info "Installing libvips via apt..."
+            sudo apt-get update && sudo apt-get install -y libvips-dev
+        else
+            info "libvips already installed"
+        fi
+    else
+        warn "Unknown OS. Please install vips/libvips manually."
+    fi
+}
+
+install_vips
+
 # Create share directory for extracted tools
 mkdir -p "$VENV_SHARE"
 

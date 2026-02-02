@@ -8,11 +8,15 @@ This method uses [uv](https://docs.astral.sh/uv/) and installs all external tool
 
 ### Prerequisites
 
-- **Python 3.9+**
+- **Python 3.11+**
 - **Java 17+**
   - macOS: `brew install openjdk@17`
   - RHEL/Fedora: `dnf install java-17-openjdk`
   - Ubuntu/Debian: `apt install openjdk-17-jdk`
+- **libvips** (image processing library)
+  - macOS: `brew install vips`
+  - RHEL/Fedora: `dnf install vips vips-devel`
+  - Ubuntu/Debian: `apt install libvips-dev`
 - **uv** (Python package manager): https://docs.astral.sh/uv/getting-started/installation/
 
 ### Installation
@@ -61,7 +65,7 @@ subscription-manager repos --enable codeready-builder-for-rhel-9-$(arch)-rpms
 dnf install https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm
 
 # Install required packages
-dnf install -y python3-pip java-17-openjdk blosc
+dnf install -y python3-pip java-17-openjdk blosc vips vips-devel
 ```
 
 ### Install imagetools

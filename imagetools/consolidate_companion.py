@@ -19,10 +19,10 @@ from __future__ import annotations
 
 import logging
 import os
-import sys
 import xml.etree.ElementTree as ET
 
-from tifffile import TiffWriter, TiffFile
+import numpy as np
+import pyvips
 
 from .extract_scenes import set_omexml
 
@@ -37,8 +37,7 @@ def consolidate_companion(companion_file: str) -> None:
     """Consolidate an OME-TIFF companion file set into a single OME-TIFF.
 
     Reads an OME companion file, loads all referenced TIFF files, and
-    combines them into a single OME-TIFF file with pyramid levels stored
-    as SubIFDs.
+    combines them into a single OME-TIFF file with pyramid levels.
 
     Args:
         companion_file: Path to the OME companion file (.companion.ome).
@@ -46,7 +45,6 @@ def consolidate_companion(companion_file: str) -> None:
 
     Note:
         The output file uses JPEG compression at quality 80 with 256x256 tiles.
-        Pyramid levels from the source files are preserved as SubIFDs.
     """
     # XML namespaces for OME-TIFF
     ns: dict[str, str] = {
@@ -66,30 +64,40 @@ def consolidate_companion(companion_file: str) -> None:
 
     logger.info(f'Consolidating {companion_file} into {ome_filename}')
 
-    # Write consolidated OME-TIFF
-    with TiffWriter(ome_filename, bigtiff=True) as ometiff:
-        options: dict[str, any] = dict(
-            tile=(256, 256),
-            compression='jpeg',
-            compressionargs={'level': 80},
-            description=f"Single image plane from",
-        )
+    # Collect all images to combine
+    images = []
+    for filename in [e.get('FileName') for e in omexml.getroot().findall('.//ome:UUID', ns)]:
+        filepath = f'{file_dir}/{filename}' if file_dir else filename
+        logger.info(f'Loading {filepath}')
 
-        # Process each referenced TIFF file
-        for filename in [e.get('FileName') for e in omexml.getroot().findall('.//ome:UUID', ns)]:
-            logger.info(f'Converting {file_dir}/{filename}')
+        # Load with pyvips
+        img = pyvips.Image.new_from_file(filepath, access='sequential')
+        images.append(img)
 
-            with TiffFile(f'{file_dir}/{filename}') as in_tiff:
-                # Write base image with SubIFD pyramid structure
-                ometiff.write(
-                    in_tiff.pages[0].asarray(),
-                    subifds=len(in_tiff.pages) - 1,
-                    **options
-                )
+    if not images:
+        logger.error('No images found in companion file')
+        return
 
-                # Write pyramid levels as SubIFDs
-                for page in in_tiff.pages[1:]:
-                    ometiff.write(page.asarray(), subfiletype=1, **options)
+    # Join images vertically (each plane becomes a row)
+    if len(images) == 1:
+        combined = images[0]
+    else:
+        combined = pyvips.Image.arrayjoin(images, across=1)
+
+    # Write with pyramid
+    write_options = {
+        'tile': True,
+        'tile_width': 256,
+        'tile_height': 256,
+        'pyramid': True,
+        'bigtiff': True,
+        'compression': 'jpeg',
+        'Q': 80,
+        'properties': True,  # Write placeholder for OME-XML
+    }
+
+    logger.info(f'Writing consolidated TIFF: {ome_filename}')
+    combined.tiffsave(ome_filename, **write_options)
 
     # Update OME-XML metadata: remove UUID elements and IFD attributes
     for tiffdata in omexml.findall('.//ome:TiffData', ns):
