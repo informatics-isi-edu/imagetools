@@ -1,125 +1,94 @@
-These are python scripts and other tools for prepping various image format files for access via the cantalop IIIF image serrver and seadragon
+# imagetools
 
-These tools depend on three external programs:
+Python scripts and tools for prepping various image format files for access via the Cantaloupe IIIF image server and Seadragon.
 
-bioformats
-visp
-bioformats2raw (https://github.com/glencoesoftware/bioformats2raw)
-raw2ometiff (https://github.com/glencoesoftware/raw2ometiff)
+## Quick Start (Recommended)
 
-## Prerequisites
+This method uses [uv](https://docs.astral.sh/uv/) and installs all external tools into the virtual environment.
 
- - Get the latest `bioformats2raw` and `bftools` applications. For example:
-   - Note: For mac users, `curl` can be used instead of `wget` 
+### Prerequisites
 
-```
-wget https://github.com/glencoesoftware/bioformats2raw/releases/download/v0.3.0/bioformats2raw-0.3.0.zip
-wget https://downloads.openmicroscopy.org/bio-formats/6.6.1/artifacts/bftools.zip
-wget https://github.com/glencoesoftware/raw2ometiff/releases/download/v0.3.1/raw2ometiff-0.3.1.zip
-```
+- **Python 3.9+**
+- **Java 17+**
+  - macOS: `brew install openjdk@17`
+  - RHEL/Fedora: `dnf install java-17-openjdk`
+  - Ubuntu/Debian: `apt install openjdk-17-jdk`
+- **uv** (Python package manager): https://docs.astral.sh/uv/getting-started/installation/
 
- - Unzip them:
+### Installation
 
-```
-unzip bioformats2raw-0.3.0.zip -d /usr/local/share/applications
-unzip bftools.zip -d /usr/local/share/applications
-unzip raw2ometiff-0.3.1.zip -d /usr/local/share/applications
-
-```
-
- - Create symbolic links:
-
-```
-cd /usr/local/bin
-ln -s /usr/local/share/applications/bioformats2raw-0.3.0/bin/bioformats2raw  bioformats2raw
-ln -s /usr/local/share/applications/bftools bftools
-ln -s /usr/local/share/applications/bftools/bfconvert bfconvert
-ln -s /usr/local/share/applications/bftools/showinf showinf
-ln -s /usr/local/share/applications/raw2ometiff-0.3.1/bin/raw2ometiff  raw2ometiff
-```
-
- - Install Python packages:
-
-```
-pip3 install --upgrade scikit-image
-pip3 install --upgrade zarr
-pip3 install --upgrade imagecodecs
-```
-
-  - Install system dependencies
-```
-dnf install blosc
-dnf install java-17-openjdk
-dnf install python3-lxml
-dnf install tiffinfo
-dnf install libtiff-toolsq
-```
-
-## Python Installation
-
-To install the `imagetools` Python package, run from the top directory:
-
-```
-pip3 install .
-```
-
-The installation will generate also the Python `extract_scenes` script.
-
-## Installation on Red Hat Enterprise Linux release 9.1
-
-  - Install EPEL Repository
-```
-subscription-manager repos --enable codeready-builder-for-rhel-9-$(arch)-rpms
-dnf install https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm
-```
-
-  - Install Prerequisites
-```
-yum update -y
-yum install python3-pip -y
-dnf install java-17-openjdk
-dnf install blosc
-```
-
-  - Install Python packages:
-```
-pip3 install --upgrade numpy
-pip3 install --upgrade zarr
-pip3 install --upgrade scikit-image
-pip3 install --upgrade imagecodecs
-```
-  - Get the latest `bioformats2raw` and `bftools` applications
-```
-wget https://downloads.openmicroscopy.org/bio-formats/6.12.0/artifacts/bftools.zip
-wget https://github.com/glencoesoftware/bioformats2raw/releases/download/v0.6.1/bioformats2raw-0.6.1.zip
-```
-  - Unzip them:
-```
-unzip bftools.zip -d /usr/local/share/applications
-unzip bioformats2raw-0.6.1.zip -d /usr/local/share/applications
-```
-  - Create symbolic links
-```
-cd /usr/local/bin
-ln -s /usr/local/share/applications/bftools/tiffcomment tiffcomment
-ln -s /usr/local/share/applications/bftools/showinf showinf
-ln -s /usr/local/share/applications/bioformats2raw-0.6.1/bin/bioformats2raw  bioformats2raw
-```
-  - Install the Python `imagetools` Package
-```
+```bash
 git clone https://github.com/informatics-isi-edu/imagetools.git
 cd imagetools
-pip3 install .
+
+# Create and activate virtual environment
+uv venv
+source .venv/bin/activate
+
+# Install Python package and dependencies
+uv pip install -e .
+
+# Install external tools (bioformats2raw, raw2ometiff, bftools)
+./setup_prerequisites.sh
+```
+
+All tools (`bioformats2raw`, `raw2ometiff`, `showinf`, `bfconvert`, etc.) are now available when the venv is active.
+
+### Verify Installation
+
+```bash
+bioformats2raw --version
+raw2ometiff --version
+showinf -version
+extract_scenes --help
+```
+
+## External Dependencies
+
+This package depends on external Java-based tools that are installed by `setup_prerequisites.sh`:
+
+- [bioformats2raw](https://github.com/glencoesoftware/bioformats2raw) - Converts Bio-Formats images to zarr
+- [raw2ometiff](https://github.com/glencoesoftware/raw2ometiff) - Converts zarr to OME-TIFF
+- [bftools](https://www.openmicroscopy.org/bio-formats/downloads/) - Bio-Formats command line tools
+
+## Installation on Red Hat Enterprise Linux 9
+
+### Install System Dependencies
+
+```bash
+# Enable EPEL repository
+subscription-manager repos --enable codeready-builder-for-rhel-9-$(arch)-rpms
+dnf install https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm
+
+# Install required packages
+dnf install -y python3-pip java-17-openjdk blosc
+```
+
+### Install imagetools
+
+```bash
+git clone https://github.com/informatics-isi-edu/imagetools.git
+cd imagetools
+
+# Create and activate virtual environment
+python3 -m venv .venv
+source .venv/bin/activate
+
+# Install package
+pip install -e .
+
+# Install external tools
+./setup_prerequisites.sh
 ```
 
 ## Extracting Scenes
 
-You can extract scenes by running the `extract_scenes` script:
+Run the `extract_scenes` script:
 
-```
+```bash
 extract_scenes --help
 
-usage: extract_scenes [-h] [--jpeg_quality JPEG_QUALITY] [--compression COMPRESSION] [--tile_size TILE_SIZE] [--force_rgb FORCE_RGB] [--processing_dir PROCESSING_DIR]  [--projection_type PROCESSING_DIR] imagefile
+usage: extract_scenes [-h] [--jpeg_quality JPEG_QUALITY] [--compression COMPRESSION] [--tile_size TILE_SIZE] [--force_rgb FORCE_RGB] [--processing_dir PROCESSING_DIR]  [--projection_type PROJECTION_TYPE] imagefile
 
 Tool to extract scenes from an image.
 
@@ -145,35 +114,37 @@ optional arguments:
                         The type of the pixel. For example uint8.
 ```
 
-The `imagefile` parameter is mandatory, while the rest are optionally. 
+### Examples
 
-From the directory where the `imagefile` resides, run:
+From the directory where the image file resides:
 
-```
+```bash
 extract_scenes <imagefile>
 ```
 
-The script generates a folder with the `<imagefile>` name (w/o its extension) having `*.companion.ome`, `*.ome.tif`, `*.ome.xml`, `*.json` files and a `*.zarr` directory.
+The script generates a folder with the `<imagefile>` name (without extension) containing `*.companion.ome`, `*.ome.tif`, `*.ome.xml`, `*.json` files and a `*.zarr` directory.
 
-Obviously, you can use also the optional parameters. Example:
+With optional parameters:
 
+```bash
+extract_scenes image.tif --processing_dir=/var/scratch/transcoding/tmp
+extract_scenes --projection_type min --pixel_type uint8 --tile_size 512 image.oir
 ```
-python3 extract_scenes.py 3XcBMPER-pHsp68-lacZ-tdTomato_E11.5_rnd1.lif_3XcBMPER-pHsp68-lacZ-tdTomato_E11.5_rnd1_Emb9-1.tif --processing_dir=/var/scratch/transcoding/tmp
-python3 extract_scenes.py --projection_type min --pixel_type uint8 --tile_size 512 10x-2x2tile-13002-ST-SN38-FU-CTX-Day4-111519_C04_G002_0001.oir
-```
 
-Alternative, you can extract scenes from a Python application:
+### Using from Python
 
-```
+```python
 from imagetools import extract_scenes
 
 extract_scenes.run(<imagefile>)
-
 ```
 
-The `extract_scenes.run` function has the following signature:
+The `extract_scenes.run` function signature:
 
-```
+```python
 def run(imagefile, jpeg_quality=80, compression='jpeg', tile_size=1024, force_rgb=False, processing_dir=None):
 ```
 
+## License
+
+Apache 2.0
