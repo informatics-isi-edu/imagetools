@@ -60,12 +60,15 @@ This package depends on external Java-based tools that are installed by `setup_p
 ### Install System Dependencies
 
 ```bash
-# Enable EPEL repository
+# Enable EPEL and CodeReady Builder repositories
 subscription-manager repos --enable codeready-builder-for-rhel-9-$(arch)-rpms
 dnf install https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm
 
+# Install Python 3.11+ (RHEL 9 ships with 3.9 by default)
+dnf install -y python3.11 python3.11-pip python3.11-devel
+
 # Install required packages
-dnf install -y python3-pip java-17-openjdk blosc vips vips-devel
+dnf install -y java-17-openjdk vips vips-devel
 ```
 
 ### Install imagetools
@@ -74,8 +77,8 @@ dnf install -y python3-pip java-17-openjdk blosc vips vips-devel
 git clone https://github.com/informatics-isi-edu/imagetools.git
 cd imagetools
 
-# Create and activate virtual environment
-python3 -m venv .venv
+# Create and activate virtual environment with Python 3.11
+python3.11 -m venv .venv
 source .venv/bin/activate
 
 # Install package
