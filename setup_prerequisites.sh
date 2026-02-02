@@ -2,7 +2,10 @@
 #
 # Install external prerequisites for imagetools into the active virtual environment
 #
-# Usage: ./setup_prerequisites.sh
+# Usage: ./setup_prerequisites.sh [--force]
+#
+# Options:
+#   --force    Force reinstall even if versions match
 #
 # Prerequisites:
 #   - An active Python virtual environment (uv venv or python -m venv)
@@ -12,10 +15,46 @@
 
 set -e
 
-# Configuration - update these versions as needed
-BIOFORMATS2RAW_VERSION="0.9.4"
-RAW2OMETIFF_VERSION="0.7.1"
-BFTOOLS_VERSION="8.0.1"
+# Parse arguments
+FORCE_INSTALL=false
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        --force) FORCE_INSTALL=true ;;
+        *) echo "Unknown option: $1"; exit 1 ;;
+    esac
+    shift
+done
+
+# Read versions from pyproject.toml
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PYPROJECT_FILE="$SCRIPT_DIR/pyproject.toml"
+
+if [ ! -f "$PYPROJECT_FILE" ]; then
+    echo "Error: pyproject.toml not found at $PYPROJECT_FILE"
+    exit 1
+fi
+
+# Parse versions from pyproject.toml using Python (works with Python 3.9+ via tomli or 3.11+ via tomllib)
+read_version() {
+    local key=$1
+    python3 -c "
+import sys
+try:
+    import tomllib
+except ImportError:
+    import tomli as tomllib
+with open('$PYPROJECT_FILE', 'rb') as f:
+    data = tomllib.load(f)
+print(data['tool']['imagetools']['prerequisites']['$key'])
+" 2>/dev/null || {
+        # Fallback to simple grep for environments without tomli/tomllib
+        grep "^$key = " "$PYPROJECT_FILE" | sed 's/.*= *"\(.*\)"/\1/'
+    }
+}
+
+BIOFORMATS2RAW_VERSION=$(read_version "bioformats2raw")
+RAW2OMETIFF_VERSION=$(read_version "raw2ometiff")
+BFTOOLS_VERSION=$(read_version "bftools")
 
 BIOFORMATS2RAW_URL="https://github.com/glencoesoftware/bioformats2raw/releases/download/v${BIOFORMATS2RAW_VERSION}/bioformats2raw-${BIOFORMATS2RAW_VERSION}.zip"
 RAW2OMETIFF_URL="https://github.com/glencoesoftware/raw2ometiff/releases/download/v${RAW2OMETIFF_VERSION}/raw2ometiff-${RAW2OMETIFF_VERSION}.zip"
@@ -25,6 +64,7 @@ BFTOOLS_URL="https://downloads.openmicroscopy.org/bio-formats/${BFTOOLS_VERSION}
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 info() {
@@ -38,6 +78,10 @@ warn() {
 error() {
     echo -e "${RED}[ERROR]${NC} $1"
     exit 1
+}
+
+skip() {
+    echo -e "${BLUE}[SKIP]${NC} $1"
 }
 
 # Check for virtual environment
@@ -55,7 +99,10 @@ VENV_SHARE="$VIRTUAL_ENV/share"
 TEMP_DIR=$(mktemp -d)
 
 info "Installing prerequisites into: $VIRTUAL_ENV"
-info "Using temp directory: $TEMP_DIR"
+info "Required versions from pyproject.toml:"
+echo "  - bioformats2raw: ${BIOFORMATS2RAW_VERSION}"
+echo "  - raw2ometiff: ${RAW2OMETIFF_VERSION}"
+echo "  - bftools: ${BFTOOLS_VERSION}"
 
 # Check for Java
 if ! command -v java &> /dev/null; then
@@ -77,18 +124,110 @@ for cmd in curl unzip; do
     fi
 done
 
+# Check and install blosc library (required by bioformats2raw for zarr compression)
+install_blosc() {
+    if [ "$(uname)" == "Darwin" ]; then
+        # macOS - use Homebrew
+        if command -v brew &> /dev/null; then
+            if ! brew list c-blosc &> /dev/null; then
+                info "Installing c-blosc via Homebrew..."
+                brew install c-blosc
+            else
+                info "c-blosc already installed via Homebrew"
+            fi
+        else
+            warn "Homebrew not found. Please install c-blosc manually:"
+            warn "  brew install c-blosc"
+            warn "Or install Homebrew first: https://brew.sh"
+        fi
+    elif [ -f /etc/redhat-release ]; then
+        # RHEL/Fedora/CentOS
+        if ! rpm -q blosc &> /dev/null 2>&1; then
+            info "Installing blosc via dnf..."
+            sudo dnf install -y blosc blosc-devel
+        else
+            info "blosc already installed"
+        fi
+    elif [ -f /etc/debian_version ]; then
+        # Debian/Ubuntu
+        if ! dpkg -l libblosc1 &> /dev/null 2>&1; then
+            info "Installing libblosc via apt..."
+            sudo apt-get update && sudo apt-get install -y libblosc1 libblosc-dev
+        else
+            info "libblosc already installed"
+        fi
+    else
+        warn "Unknown OS. Please install blosc/c-blosc manually."
+    fi
+}
+
+install_blosc
+
 # Create share directory for extracted tools
 mkdir -p "$VENV_SHARE"
 
-# Function to download and install a tool
+# Function to get installed version of a tool
+get_installed_version() {
+    local tool=$1
+    local version_dir=""
+
+    case $tool in
+        bioformats2raw)
+            # Check for existing installation directory
+            version_dir=$(ls -d "$VENV_SHARE"/bioformats2raw-* 2>/dev/null | head -1)
+            if [ -n "$version_dir" ]; then
+                basename "$version_dir" | sed 's/bioformats2raw-//'
+            fi
+            ;;
+        raw2ometiff)
+            version_dir=$(ls -d "$VENV_SHARE"/raw2ometiff-* 2>/dev/null | head -1)
+            if [ -n "$version_dir" ]; then
+                basename "$version_dir" | sed 's/raw2ometiff-//'
+            fi
+            ;;
+        bftools)
+            # bftools doesn't have version in directory name, check via showinf
+            if [ -x "$VENV_BIN/showinf" ]; then
+                "$VENV_BIN/showinf" -version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1
+            fi
+            ;;
+    esac
+}
+
+# Function to compare versions (returns 0 if v1 >= v2)
+version_gte() {
+    local v1=$1
+    local v2=$2
+    [ "$(printf '%s\n' "$v2" "$v1" | sort -V | head -n1)" = "$v2" ]
+}
+
+# Function to download and install a tool with version checking
 install_tool() {
     local name=$1
     local url=$2
     local extracted_dir=$3
     local bin_subdir=$4
     local binaries=$5
+    local required_version=$6
 
-    info "Downloading $name..."
+    # Check installed version
+    local installed_version=$(get_installed_version "$name")
+
+    if [ -n "$installed_version" ] && [ "$FORCE_INSTALL" = false ]; then
+        if [ "$installed_version" = "$required_version" ]; then
+            skip "$name $installed_version already installed (matches required version)"
+            return 0
+        elif version_gte "$installed_version" "$required_version"; then
+            skip "$name $installed_version already installed (>= required $required_version)"
+            return 0
+        else
+            info "$name $installed_version installed, upgrading to $required_version..."
+            # Remove old version
+            rm -rf "$VENV_SHARE/${name}-${installed_version}"
+        fi
+    fi
+
+    info "Downloading $name $required_version..."
     curl -L -o "$TEMP_DIR/$name.zip" "$url"
 
     info "Extracting $name..."
@@ -109,37 +248,89 @@ install_tool() {
     done
 }
 
+# Function to configure JNA library path for blosc in bioformats2raw
+configure_jna_path() {
+    local bf2raw_script="$VENV_SHARE/bioformats2raw-${BIOFORMATS2RAW_VERSION}/bin/bioformats2raw"
+
+    if [ -f "$bf2raw_script" ]; then
+        # Check if already configured
+        if grep -q "JNA_LIB_PATH" "$bf2raw_script"; then
+            info "JNA library path already configured in bioformats2raw"
+            return 0
+        fi
+
+        info "Configuring JNA library path for blosc in bioformats2raw..."
+
+        # Insert JNA configuration after the DEFAULT_JVM_OPTS line
+        sed -i.bak '/^DEFAULT_JVM_OPTS=/c\
+# Set JNA library path for blosc on macOS (Homebrew) and Linux\
+if "$darwin" ; then\
+    JNA_LIB_PATH="${JNA_LIBRARY_PATH:-/opt/homebrew/lib:/usr/local/lib}"\
+else\
+    JNA_LIB_PATH="${JNA_LIBRARY_PATH:-/usr/lib:/usr/local/lib}"\
+fi\
+DEFAULT_JVM_OPTS="-Djna.library.path=$JNA_LIB_PATH"' "$bf2raw_script"
+
+        rm -f "${bf2raw_script}.bak"
+        info "JNA library path configured"
+    fi
+}
+
 # Install bioformats2raw
 install_tool "bioformats2raw" \
     "$BIOFORMATS2RAW_URL" \
     "bioformats2raw-${BIOFORMATS2RAW_VERSION}" \
     "bin" \
-    "bioformats2raw"
+    "bioformats2raw" \
+    "$BIOFORMATS2RAW_VERSION"
+
+# Configure JNA path for blosc
+configure_jna_path
 
 # Install raw2ometiff
 install_tool "raw2ometiff" \
     "$RAW2OMETIFF_URL" \
     "raw2ometiff-${RAW2OMETIFF_VERSION}" \
     "bin" \
-    "raw2ometiff"
+    "raw2ometiff" \
+    "$RAW2OMETIFF_VERSION"
 
-# Install bftools
-info "Downloading bftools..."
-curl -L -o "$TEMP_DIR/bftools.zip" "$BFTOOLS_URL"
+# Install bftools with version checking
+install_bftools() {
+    local installed_version=$(get_installed_version "bftools")
 
-info "Extracting bftools..."
-unzip -q -o "$TEMP_DIR/bftools.zip" -d "$VENV_SHARE"
-
-info "Creating symlinks for bftools..."
-for binary in bfconvert showinf tiffcomment ijview formatlist xmlindent xmlvalid; do
-    src="$VENV_SHARE/bftools/$binary"
-    dest="$VENV_BIN/$binary"
-    if [ -f "$src" ]; then
-        ln -sf "$src" "$dest"
-        chmod +x "$src"
-        info "  Linked: $binary"
+    if [ -n "$installed_version" ] && [ "$FORCE_INSTALL" = false ]; then
+        if [ "$installed_version" = "$BFTOOLS_VERSION" ]; then
+            skip "bftools $installed_version already installed (matches required version)"
+            return 0
+        elif version_gte "$installed_version" "$BFTOOLS_VERSION"; then
+            skip "bftools $installed_version already installed (>= required $BFTOOLS_VERSION)"
+            return 0
+        else
+            info "bftools $installed_version installed, upgrading to $BFTOOLS_VERSION..."
+            rm -rf "$VENV_SHARE/bftools"
+        fi
     fi
-done
+
+    info "Downloading bftools $BFTOOLS_VERSION..."
+    curl -L -o "$TEMP_DIR/bftools.zip" "$BFTOOLS_URL"
+
+    info "Extracting bftools..."
+    unzip -q -o "$TEMP_DIR/bftools.zip" -d "$VENV_SHARE"
+
+    info "Creating symlinks for bftools..."
+    for binary in bfconvert showinf tiffcomment ijview formatlist xmlindent xmlvalid; do
+        src="$VENV_SHARE/bftools/$binary"
+        dest="$VENV_BIN/$binary"
+        if [ -f "$src" ]; then
+            ln -sf "$src" "$dest"
+            chmod +x "$src"
+            info "  Linked: $binary"
+        fi
+    done
+}
+
+install_bftools
 
 # Cleanup
 rm -rf "$TEMP_DIR"

@@ -4,8 +4,11 @@ This package provides tools for converting various microscopy image formats
 (supported by Bio-Formats) into IIIF-compatible TIFF files suitable for
 viewing with OpenSeadragon and other IIIF viewers.
 
-Main modules:
+Modules:
     extract_scenes: Extract and convert scenes from microscopy images.
+    consolidate_companion: Consolidate OME-TIFF companion files into a single file.
+    convert_pyramid: Convert OME-TIFF to pyramidal TIFF format using pyvips.
+    qupath_svg: Convert QuPath SVG annotations to OpenSeadragon format.
 
 Example:
     >>> from imagetools import extract_scenes
@@ -13,6 +16,20 @@ Example:
 """
 
 from imagetools import extract_scenes
+from imagetools import consolidate_companion
+from imagetools import qupath_svg
+
+# convert_pyramid requires optional pyvips dependency - import lazily
+def __getattr__(name: str):
+    if name == "convert_pyramid":
+        from imagetools import convert_pyramid
+        return convert_pyramid
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __version__ = "0.1.0"
-__all__ = ["extract_scenes"]
+__all__ = [
+    "extract_scenes",
+    "consolidate_companion",
+    "convert_pyramid",
+    "qupath_svg",
+]

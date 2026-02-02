@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import gc
 import json
 import logging
 import math
@@ -38,6 +39,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tracemalloc
 import uuid
 from typing import Any, Optional
 
@@ -73,6 +75,90 @@ OME_TIF_FILE = "{file}.ome.tif"
 # Global counters for formatting Z-index and channel strings
 NUMBER_OF_Z_INDEX: Optional[int] = None
 NUMBER_OF_CHANNELS: Optional[int] = None
+
+# Memory profiling state
+_tracemalloc_started: bool = False
+
+
+def log_memory(label: str, log_tracemalloc: bool = True) -> dict[str, Any]:
+    """Log current memory usage for profiling.
+
+    Logs both RSS (Resident Set Size) from resource module and optionally
+    tracemalloc statistics for Python heap memory tracking.
+
+    Args:
+        label: Descriptive label for this measurement point.
+        log_tracemalloc: If True, include tracemalloc stats (requires tracemalloc.start()).
+
+    Returns:
+        Dictionary containing memory metrics:
+        - rss_gb: Current RSS in GiB
+        - tracemalloc_current_mb: Current traced memory in MiB (if enabled)
+        - tracemalloc_peak_mb: Peak traced memory in MiB (if enabled)
+    """
+    global _tracemalloc_started
+
+    usage = resource.getrusage(resource.RUSAGE_SELF)
+    divisor = 2 ** 20 if platform.system() == 'Linux' else 2 ** 30
+    rss_gb = usage.ru_maxrss / divisor
+
+    metrics: dict[str, Any] = {'rss_gb': rss_gb}
+
+    if log_tracemalloc and _tracemalloc_started:
+        current, peak = tracemalloc.get_traced_memory()
+        metrics['tracemalloc_current_mb'] = current / (1024 * 1024)
+        metrics['tracemalloc_peak_mb'] = peak / (1024 * 1024)
+        logger.info(
+            f'[MEMORY] {label}: RSS={rss_gb:.2f} GiB, '
+            f'traced={metrics["tracemalloc_current_mb"]:.1f} MiB, '
+            f'peak={metrics["tracemalloc_peak_mb"]:.1f} MiB'
+        )
+    else:
+        logger.info(f'[MEMORY] {label}: RSS={rss_gb:.2f} GiB')
+
+    return metrics
+
+
+def start_memory_tracing() -> None:
+    """Start tracemalloc for detailed Python memory tracking."""
+    global _tracemalloc_started
+    if not _tracemalloc_started:
+        tracemalloc.start()
+        _tracemalloc_started = True
+        logger.info('[MEMORY] tracemalloc started')
+
+
+def stop_memory_tracing() -> None:
+    """Stop tracemalloc and log final statistics."""
+    global _tracemalloc_started
+    if _tracemalloc_started:
+        current, peak = tracemalloc.get_traced_memory()
+        logger.info(
+            f'[MEMORY] tracemalloc final: current={current / (1024 * 1024):.1f} MiB, '
+            f'peak={peak / (1024 * 1024):.1f} MiB'
+        )
+        tracemalloc.stop()
+        _tracemalloc_started = False
+        logger.info('[MEMORY] tracemalloc stopped')
+
+
+def log_top_memory_allocations(limit: int = 10) -> None:
+    """Log the top memory-consuming allocations.
+
+    Args:
+        limit: Number of top allocations to display.
+    """
+    global _tracemalloc_started
+    if not _tracemalloc_started:
+        logger.warning('[MEMORY] tracemalloc not started, cannot show allocations')
+        return
+
+    snapshot = tracemalloc.take_snapshot()
+    top_stats = snapshot.statistics('lineno')
+
+    logger.info(f'[MEMORY] Top {limit} memory allocations:')
+    for idx, stat in enumerate(top_stats[:limit], 1):
+        logger.info(f'[MEMORY]   #{idx}: {stat}')
 
 
 class OMETiff:
@@ -279,6 +365,8 @@ class OMETiff:
             start_usage = resource.getrusage(resource.RUSAGE_SELF)
             outfile = IIIF_FILE.format(file=filename, s=self.Number, z=z_string(z), c=c_string(channel_number))
 
+            log_memory(f'generate_iiif_tiff start (s={self.Number}, z={z}, c={channel_number})')
+
             # Compute pyramid levels to get ~1K pixels at top level
             resolutions = int(math.log2(max(self.SizeX, self.SizeY)) - 9) if resolutions is None else resolutions
             image_size = self.SizeX * self.SizeY * self.SizeC / (2 ** 20 if platform.system() == 'Linux' else 2 ** 30)
@@ -289,7 +377,8 @@ class OMETiff:
                 # Set up compression and metadata options
                 options: dict[str, Any] = dict(
                     tile=(tile_size, tile_size),
-                    compression=('jpeg', self.JPEG_QUALITY) if compression.lower() == 'jpeg' else compression,
+                    compression='jpeg' if compression.lower() == 'jpeg' else compression,
+                    compressionargs={'level': self.JPEG_QUALITY} if compression.lower() == 'jpeg' else None,
                     description=f"Single image plane from {filename}",
                     metadata=None
                 )
@@ -306,9 +395,12 @@ class OMETiff:
                 else:
                     image = self.zarr_series['0'][0, channel_number, z, :, :]
 
+                log_memory(f'after loading image from zarr (shape={image.shape}, dtype={image.dtype}, nbytes={image.nbytes / (1024**2):.1f} MiB)')
+
                 # Convert 16-bit to 8-bit if using JPEG compression
                 if compression == 'jpeg' and self.Type == 'uint16':
                     logger.info(f'Converting from uint16 to uint8')
+                    log_memory('before uint16 to uint8 conversion')
                     histogram, bins = skimage.exposure.histogram(image)
                     image = skimage.exposure.equalize_hist(image)
                     image = skimage.util.img_as_ubyte(image)
@@ -319,10 +411,14 @@ class OMETiff:
                     self.ome_mods['SignificantBits'] = '8'
                     histogram, bins = skimage.exposure.histogram(image)
                     self.Channels[channel_number]['Intensity_Histogram'] = histogram.tolist()
+                    log_memory(f'after uint16 to uint8 conversion (shape={image.shape}, dtype={image.dtype})')
+                    gc.collect()
+                    log_memory('after gc.collect()')
 
                 # Convert RGB to interleaved format for downstream tools
                 if self.RGB:
                     logger.info(f'interleaving RGB....{image.shape}')
+                    log_memory('before RGB interleaving')
                     image = np.moveaxis(image, 0, -1)
                     options.update({'photometric': 'RGB', 'planarconfig': 'CONTIG'})
                     iiif_pixels.attrib['Interleaved'] = "true"
@@ -331,13 +427,22 @@ class OMETiff:
                         value_image = skimage.color.rgb2hsv(image)[:, :, 2]
                         histogram = skimage.exposure.histogram(value_image, nbins=256)[0]
                         self.Channels[channel_number]['Intensity_Histogram'] = histogram.tolist()
+                        del value_image
+                    log_memory(f'after RGB interleaving (shape={image.shape})')
 
                 logger.info(f'writing base image....{image.shape}')
+                log_memory('before writing TIFF')
                 # Write base image and pyramid levels (subsampling consistent with Bio-Formats)
                 tiff_out.write(image, **options)
                 logger.info(f'writing pyramid with {resolutions} levels ....')
                 for i in range(1, resolutions):
                     tiff_out.write(image[::2 ** i, ::2 ** i], subfiletype=1, **options)
+                log_memory('after writing TIFF')
+
+            # Explicitly free image memory
+            del image
+            gc.collect()
+            log_memory('after del image and gc.collect()')
 
             # Add OMEXML data (requires separate call due to unicode encoding)
             set_omexml(outfile, iiif_omexml)
@@ -358,8 +463,8 @@ class OMETiff:
         ) -> ET.ElementTree:
             """Create OME-XML for a single Z plane and channel.
 
-            Restructures the OME-TIFF XML description to only include the
-            specified Z plane and channel.
+            Builds minimal OME-XML from template rather than deep copying
+            and removing elements, which is more memory efficient.
 
             Args:
                 z: Z plane index to include.
@@ -369,44 +474,60 @@ class OMETiff:
             Returns:
                 ElementTree containing the subset OME-XML.
             """
-            subset_omexml = copy.deepcopy(self.ometiff.omexml.getroot())
-            subset_omexml.set('UUID', f'urn:uuid:{self.ometiff.uuid[(self.Number, z, channel)]}')
+            ome_ns = "http://www.openmicroscopy.org/Schemas/OME/2016-06"
+            xsi_ns = "http://www.w3.org/2001/XMLSchema-instance"
 
-            # Remove other images, keeping only this series
-            for i, image in enumerate(subset_omexml.findall('.//ome:Image', self.ns)):
-                if i != self.Number:
-                    subset_omexml.remove(image)
+            # Build OME root element with namespaces
+            root = ET.Element(f"{{{ome_ns}}}OME")
+            root.set(f"{{{xsi_ns}}}schemaLocation",
+                     "http://www.openmicroscopy.org/Schemas/OME/2016-06 "
+                     "http://www.openmicroscopy.org/Schemas/OME/2016-06/ome.xsd")
+            root.set("UUID", f"urn:uuid:{self.ometiff.uuid[(self.Number, z, channel)]}")
 
-            # Update Pixels element
-            pixels = subset_omexml.find('.//ome:Pixels', self.ns)
-            if SizeC is None:
-                pixels.set('SizeC', "3" if self.RGB else "1")
-            else:
-                pixels.set('SizeC', SizeC)
-            pixels.set('SizeZ', "1")
+            # Copy only this Image element (shallow copy of structure, deep copy of one image)
+            src_image = self.Image
+            image = ET.SubElement(root, f"{{{ome_ns}}}Image")
+            image.set("ID", src_image.get("ID"))
+            if src_image.get("Name"):
+                image.set("Name", src_image.get("Name"))
 
-            # Create TiffData element
-            tiffdata_tag = "{http://www.openmicroscopy.org/Schemas/OME/2016-06}TiffData"
-            tiffdata = ET.Element(tiffdata_tag,
-                                  attrib={"IFD": "0", "PlaneCount": "1", "FirstC": str(channel), "FirstZ": str(z)})
+            # Copy Pixels element with modified attributes
+            src_pixels = self.Pixels
+            pixels = ET.SubElement(image, f"{{{ome_ns}}}Pixels")
+            for attr in ["ID", "DimensionOrder", "Type", "SizeX", "SizeY", "SizeT",
+                         "PhysicalSizeX", "PhysicalSizeXUnit", "PhysicalSizeY", "PhysicalSizeYUnit",
+                         "PhysicalSizeZ", "PhysicalSizeZUnit", "SignificantBits", "Interleaved", "BigEndian"]:
+                if src_pixels.get(attr) is not None:
+                    pixels.set(attr, src_pixels.get(attr))
 
-            # Insert TiffData before first Plane element
-            try:
-                pixels.insert(list(pixels).index(pixels.find('.//ome:Plane', self.ns)), tiffdata)
-            except ValueError:
-                pixels.append(tiffdata)
+            # Set modified size attributes
+            pixels.set("SizeC", SizeC if SizeC else ("3" if self.RGB else "1"))
+            pixels.set("SizeZ", "1")
 
-            # Remove other channel definitions
-            for i, channel_element in enumerate(pixels.findall('.//ome:Channel', self.ns)):
-                if i != channel:
-                    pixels.remove(channel_element)
+            # Copy only the relevant Channel element
+            src_channels = src_pixels.findall('ome:Channel', self.ns)
+            if channel < len(src_channels):
+                src_channel = src_channels[channel]
+                channel_elem = ET.SubElement(pixels, f"{{{ome_ns}}}Channel")
+                for attr, val in src_channel.attrib.items():
+                    channel_elem.set(attr, val)
 
-            # Remove other planes
-            for plane in pixels.findall('.//ome:Plane', self.ns):
-                if (int(plane.get('TheZ')) != z) or (int(plane.get('TheC')) != channel):
-                    pixels.remove(plane)
+            # Add TiffData element
+            tiffdata = ET.SubElement(pixels, f"{{{ome_ns}}}TiffData")
+            tiffdata.set("IFD", "0")
+            tiffdata.set("PlaneCount", "1")
+            tiffdata.set("FirstC", str(channel))
+            tiffdata.set("FirstZ", str(z))
 
-            return ET.ElementTree(subset_omexml)
+            # Copy only the relevant Plane element
+            for src_plane in self.Planes:
+                if (int(src_plane.get('TheZ')) == z) and (int(src_plane.get('TheC')) == channel):
+                    plane = ET.SubElement(pixels, f"{{{ome_ns}}}Plane")
+                    for attr, val in src_plane.attrib.items():
+                        plane.set(attr, val)
+                    break
+
+            return ET.ElementTree(root)
 
         def series_omexml(self, z: int) -> ET.ElementTree:
             """Create OME-XML for a single series with multiple channels.
@@ -516,8 +637,17 @@ class OMETiff:
             'xsi': "http://www.w3.org/2001/XMLSchema-instance"
         }
 
+        log_memory(f'OMETiff.__init__ start ({filename})')
         logger.info("Getting {} metadata....".format(filename))
-        self.zarr_data = zarr.open(zarr.NestedDirectoryStore(filename), 'r')
+        # zarr 3.x API uses LocalStore instead of NestedDirectoryStore
+        try:
+            from zarr.storage import LocalStore
+            store = LocalStore(filename)
+            self.zarr_data = zarr.open_group(store, mode='r')
+        except ImportError:
+            # Fallback for zarr 2.x
+            self.zarr_data = zarr.open(zarr.NestedDirectoryStore(filename), 'r')
+        log_memory('after opening zarr file')
 
         # Parse OME-XML metadata, handling namespace issues
         try:
@@ -591,7 +721,10 @@ class OMETiff:
             projection_type: str,
             channel_number: int
         ) -> None:
-            """Generate Z-projection for a series.
+            """Generate Z-projection for a series incrementally.
+
+            Processes one Z-plane at a time to minimize memory usage,
+            rather than loading the entire Z-stack at once.
 
             Args:
                 series: Series to process.
@@ -608,24 +741,56 @@ class OMETiff:
                 f'NUMBER_OF_CHANNELS: {series.SizeC} CHANNEL_NAMES: {series.channel_names}'
             )
 
-            image = series.zarr_series['0'][0, channel_number:channel_number+1, :, :, :]
-            image_shape = image.shape
-            logger.info(f'image.shape: {image.shape}')
+            log_memory(f'generate_projection start (series={series.Number}, channel={channel_number})')
 
-            # Apply projection if multiple Z planes exist
-            if image_shape[1] == 1:
-                series.projection = image
+            # Process one Z-plane at a time to minimize memory usage
+            num_z = series.SizeZ
+            logger.info(f'Building "{projection_type}" projection incrementally over {num_z} Z-planes')
+
+            if num_z == 1:
+                # Single Z-plane, just load it directly
+                plane = series.zarr_series['0'][0, channel_number, 0, :, :]
+                series.projection = plane[np.newaxis, np.newaxis, :, :]  # Add C and Z dims
+                log_memory(f'single Z-plane loaded (shape={series.projection.shape})')
             else:
-                logger.info(f'Building the "{projection_type}" projection')
-                if projection_type == 'min':
-                    series.projection = image.min(axis=1, keepdims=True)
-                elif projection_type == 'mean':
-                    series.projection = image.mean(axis=1, keepdims=True)
-                elif projection_type == 'max':
-                    series.projection = image.max(axis=1, keepdims=True)
-                else:
-                    logger.info(f'Invalid projection type: {projection_type}')
-                    sys.exit(1)
+                # Incremental projection computation
+                proj = None
+                for z in range(num_z):
+                    plane = series.zarr_series['0'][0, channel_number, z, :, :]
+
+                    if z == 0:
+                        # Initialize projection with first plane
+                        if projection_type == 'mean':
+                            # Use float for mean to avoid overflow
+                            proj = plane.astype(np.float64)
+                        else:
+                            proj = plane.copy()
+                        log_memory(f'initialized projection with z=0 (shape={proj.shape}, nbytes={proj.nbytes / (1024**2):.1f} MiB)')
+                    else:
+                        # Update projection incrementally
+                        if projection_type == 'min':
+                            np.minimum(proj, plane, out=proj)
+                        elif projection_type == 'max':
+                            np.maximum(proj, plane, out=proj)
+                        elif projection_type == 'mean':
+                            proj += plane
+                        else:
+                            logger.error(f'Invalid projection type: {projection_type}')
+                            sys.exit(1)
+
+                    # Log progress every 10 planes
+                    if (z + 1) % 10 == 0 or z == num_z - 1:
+                        logger.info(f'Processed Z-plane {z + 1}/{num_z}')
+
+                # Finalize mean projection
+                if projection_type == 'mean':
+                    proj = (proj / num_z).astype(plane.dtype)
+
+                # Add channel and Z dimensions to match expected shape (1, 1, Y, X)
+                series.projection = proj[np.newaxis, np.newaxis, :, :]
+                del proj
+                gc.collect()
+                log_memory(f'after {projection_type} projection complete')
 
             logger.info(
                 f'series.projection.shape: {series.projection.shape} '
@@ -635,6 +800,7 @@ class OMETiff:
 
         start_time = time.time()
         start_usage = resource.getrusage(resource.RUSAGE_SELF)
+        log_memory('generate_projection_ome_tiff start')
 
         # Load source metadata and find appropriate channel
         metadata = OMETiff.xml2json(f'{outdir}/SOURCEMETADATA.ome.xml')
@@ -697,7 +863,8 @@ class OMETiff:
 
                 if pixel_type == 'uint8' or series.RGB:
                     options.update({
-                        'compression': ('jpeg', series.JPEG_QUALITY) if compression.lower() == 'jpeg' else compression
+                        'compression': 'jpeg' if compression.lower() == 'jpeg' else compression,
+                        'compressionargs': {'level': series.JPEG_QUALITY} if compression.lower() == 'jpeg' else None
                     })
                     physical_size = series.PhysicalSize
                     if physical_size is not None:
@@ -706,6 +873,7 @@ class OMETiff:
                     # Convert 16-bit to 8-bit for JPEG
                     if compression == 'jpeg' and series.Type == 'uint16':
                         logger.info(f'Converting from uint16 to uint8')
+                        log_memory('before projection uint16 to uint8 conversion')
                         histogram, bins = skimage.exposure.histogram(image)
                         image = skimage.exposure.equalize_hist(image)
                         image = skimage.util.img_as_ubyte(image)
@@ -717,10 +885,14 @@ class OMETiff:
                         histogram, bins = skimage.exposure.histogram(image)
                         series.Channels[0]['Intensity_Histogram'] = histogram.tolist()
                         logger.info(f'writing image shape after uint16 to uint8 ....{image.shape}')
+                        log_memory(f'after projection uint16 to uint8 (shape={image.shape}, dtype={image.dtype})')
+                        gc.collect()
+                        log_memory('after gc.collect()')
 
                     # Handle RGB interleaving
                     if series.RGB:
                         logger.info(f'interleaving RGB....{image.shape}')
+                        log_memory('before projection RGB interleaving')
                         image = np.moveaxis(image, 0, -1)
                         options.update({'photometric': 'RGB', 'planarconfig': 'CONTIG'})
                         options['metadata']['axes'] = 'YXS'
@@ -730,7 +902,9 @@ class OMETiff:
                             value_image = skimage.color.rgb2hsv(image)[:, :, 2]
                             histogram = skimage.exposure.histogram(value_image, nbins=256)[0]
                             series.Channels[0]['Intensity_Histogram'] = histogram.tolist()
+                            del value_image
                         logger.info(f'writing image shape after RGB ....{image.shape}')
+                        log_memory(f'after projection RGB interleaving (shape={image.shape})')
 
                     logger.info(f'writing base image....{image.shape}')
                     logger.info(f'image dtype: {image.dtype}')
@@ -746,9 +920,26 @@ class OMETiff:
                         **options
                     )
 
+                # Free projection data immediately after writing each series
+                del image
+                if series.projection is not None:
+                    del series.projection
+                    series.projection = None
+                gc.collect()
+                log_memory(f'after freeing series {series.Number} projection data')
+
         # Write projection metadata
         with open(f'{outdir}/PROJECTION.ome.xml', 'w') as metadata_file:
             metadata_file.write(OMETiff.source_metadata(outfile))
+
+        # Free projection data
+        for series in self.series:
+            if series.projection is not None:
+                del series.projection
+                series.projection = None
+        gc.collect()
+        log_memory('after freeing projection data')
+        log_top_memory_allocations(10)
 
         # Log performance metrics
         end_usage = resource.getrusage(resource.RUSAGE_SELF)
@@ -1116,6 +1307,7 @@ def seadragon_tiffs(
     global NUMBER_OF_Z_INDEX
     global NUMBER_OF_CHANNELS
 
+    log_memory(f'seadragon_tiffs start ({image_path})')
     image_file = os.path.basename(image_path)
 
     # Handle zarr input vs other formats
@@ -1170,6 +1362,8 @@ def seadragon_tiffs(
 
     # Write metadata files
     ome_contents.dump(filename)
+    log_memory('seadragon_tiffs complete')
+    log_top_memory_allocations(10)
     return ome_contents
 
 
@@ -1194,6 +1388,7 @@ def projection_ome_tiff(
     Returns:
         OMETiff object containing the processed metadata.
     """
+    log_memory(f'projection_ome_tiff start ({image_path}, {projection_type})')
     image_file = os.path.basename(image_path)
 
     if is_zarr(image_path):
@@ -1219,6 +1414,7 @@ def projection_ome_tiff(
         compression=compression, pixel_type=pixel_type, tile_size=tile_size
     )
 
+    log_memory('projection_ome_tiff complete')
     return ome_contents
 
 
@@ -1231,6 +1427,7 @@ def convert_to_ome_tiff(image_path: str) -> OMETiff:
     Returns:
         OMETiff object containing the processed metadata.
     """
+    log_memory(f'convert_to_ome_tiff start ({image_path})')
     image_file = os.path.basename(image_path)
 
     if is_zarr(image_path):
@@ -1282,10 +1479,16 @@ def convert_to_ome_tiff(image_path: str) -> OMETiff:
 
     with open(outfile, 'wb') as imout:
         for series in ome_contents.series:
+            log_memory(f'convert_to_ome_tiff: loading series {series.Number}')
             image = series.zarr_series['0'][0, :, :, :, :]
             logger.info(f'image.shape: {image.shape}')
+            log_memory(f'after loading image (shape={image.shape}, nbytes={image.nbytes / (1024**2):.1f} MiB)')
             imwrite(imout, image, **options)
+            del image
+            gc.collect()
+            log_memory(f'after writing series {series.Number} and gc.collect()')
 
+    log_memory('convert_to_ome_tiff complete')
     return ome_contents
 
 
@@ -1324,6 +1527,10 @@ def run(
     OMETiff.OMETiffSeries.JPEG_QUALITY = jpeg_quality
     TMPDIR = processing_dir
 
+    # Start memory profiling
+    start_memory_tracing()
+    log_memory(f'run() start ({imagefile})')
+
     try:
         start_time = time.time()
 
@@ -1342,6 +1549,10 @@ def run(
             )
 
         # Print performance summary
+        log_memory('run() complete')
+        log_top_memory_allocations(15)
+        stop_memory_tracing()
+
         print(f"--- {(time.time() - start_time):.2f} seconds ---")
         usage = resource.getrusage(resource.RUSAGE_SELF)
         print(f"  utime: {usage.ru_utime:.2f}")
@@ -1350,6 +1561,7 @@ def run(
         return 0
 
     except subprocess.CalledProcessError as r:
+        stop_memory_tracing()
         print(r.cmd)
         print(r.stderr)
         return 1
