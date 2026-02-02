@@ -169,7 +169,7 @@ Additional CLI tools are available:
 # Consolidate companion OME-TIFF files into a single file
 consolidate_companion image.companion.ome
 
-# Convert TIFF to pyramid format (requires pyvips)
+# Convert TIFF to pyramid format
 convert_pyramid image.tif
 
 # Extract SVG annotations from QuPath
