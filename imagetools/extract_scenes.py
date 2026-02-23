@@ -56,6 +56,64 @@ import xml.etree.ElementTree as ET
 TMPDIR: Optional[str] = None
 
 logger = logging.getLogger(__name__)
+
+# Valid depth conversion methods
+DEPTH_CONVERSION_METHODS = ('equalize', 'rescale', 'percentile')
+
+
+def convert_depth(
+    image: np.ndarray,
+    method: str = 'rescale',
+    percentile_low: float = 1.0,
+    percentile_high: float = 99.0
+) -> np.ndarray:
+    """Convert a 16-bit image to 8-bit using the specified method.
+
+    Args:
+        image: Input image array (uint16).
+        method: Conversion method:
+            - 'equalize': Histogram equalization (maximizes contrast).
+            - 'rescale': Linear rescaling from full uint16 range to uint8.
+            - 'percentile': Clip to percentile range then rescale.
+        percentile_low: Lower percentile for clipping (only used with 'percentile').
+        percentile_high: Upper percentile for clipping (only used with 'percentile').
+
+    Returns:
+        Converted uint8 image array.
+
+    Raises:
+        ValueError: If method is not one of the valid options.
+    """
+    if method not in DEPTH_CONVERSION_METHODS:
+        raise ValueError(
+            f"Invalid depth_conversion method '{method}'. "
+            f"Valid options: {DEPTH_CONVERSION_METHODS}"
+        )
+
+    if image.dtype != np.uint16:
+        # Already 8-bit or other format, just convert
+        return skimage.util.img_as_ubyte(image)
+
+    if method == 'equalize':
+        # Histogram equalization - maximizes contrast
+        image = skimage.exposure.equalize_hist(image)
+        return skimage.util.img_as_ubyte(image)
+
+    elif method == 'rescale':
+        # Linear rescaling from full uint16 range
+        return (image / 256).astype(np.uint8)
+
+    elif method == 'percentile':
+        # Clip to percentile range then rescale
+        p_low = np.percentile(image, percentile_low)
+        p_high = np.percentile(image, percentile_high)
+        # Clip and rescale to 0-255
+        clipped = np.clip(image, p_low, p_high)
+        if p_high > p_low:
+            scaled = (clipped - p_low) / (p_high - p_low) * 255
+        else:
+            scaled = np.zeros_like(clipped, dtype=np.float64)
+        return scaled.astype(np.uint8)
 FORMAT = "[%(filename)s:%(lineno)s - %(funcName)20s() ] %(message)s"
 
 # External command paths - these should be on PATH after running setup_prerequisites.sh
@@ -345,7 +403,9 @@ class OMETiff:
             channel_number: int = 0,
             tile_size: int = 1024,
             resolutions: Optional[int] = None,
-            compression: str = 'jpeg'
+            compression: str = 'jpeg',
+            pixel_type: Optional[str] = None,
+            depth_conversion: str = 'rescale'
         ) -> None:
             """Create an IIIF-compatible TIFF file for a single image plane.
 
@@ -359,6 +419,11 @@ class OMETiff:
                 channel_number: Channel number to select.
                 tile_size: Tile size in pixels (default 1024).
                 resolutions: Number of pyramid resolutions to generate.
+                pixel_type: Output pixel type ('uint8' or 'uint16'). If None,
+                    uses source type (but JPEG always requires uint8).
+                depth_conversion: Method for converting 16-bit to 8-bit:
+                    'equalize' (histogram equalization), 'rescale' (linear),
+                    or 'percentile' (clip outliers then rescale).
                     Defaults to enough levels for 1K pixels at top.
                 compression: Compression algorithm ('jpeg', 'lzw', etc.).
             """
@@ -415,22 +480,29 @@ class OMETiff:
                     else:
                         tile = zarr_arr[0, channel_number, z, y0:y1, x0:x1]  # (h, w)
 
-                    # Convert uint16 to uint8 if needed
-                    if compression == 'jpeg' and self.Type == 'uint16':
-                        tile = skimage.exposure.equalize_hist(tile)
-                        tile = skimage.util.img_as_ubyte(tile)
+                    # Convert uint16 to uint8 if needed (JPEG requires 8-bit,
+                    # or if pixel_type explicitly requests uint8)
+                    needs_conversion = (
+                        self.Type == 'uint16' and
+                        (compression == 'jpeg' or pixel_type == 'uint8')
+                    )
+                    if needs_conversion:
+                        tile = convert_depth(tile, method=depth_conversion)
 
                     # Ensure contiguous array for pyvips
                     tile = np.ascontiguousarray(tile)
 
+                    # Determine pyvips format based on tile dtype
+                    vips_format = 'uchar' if tile.dtype == np.uint8 else 'ushort'
+
                     # Create pyvips image from tile
                     if tile.ndim == 2:
                         vips_tile = pyvips.Image.new_from_memory(
-                            tile.data, tile_w, tile_h, 1, 'uchar'
+                            tile.data, tile_w, tile_h, 1, vips_format
                         )
                     else:
                         vips_tile = pyvips.Image.new_from_memory(
-                            tile.data, tile_w, tile_h, tile.shape[2], 'uchar'
+                            tile.data, tile_w, tile_h, tile.shape[2], vips_format
                         )
 
                     col_images.append(vips_tile)
@@ -455,7 +527,11 @@ class OMETiff:
             log_memory('after building pyvips image from tiles')
 
             # Update OME-XML for format changes
-            if compression == 'jpeg' and self.Type == 'uint16':
+            converted_to_uint8 = (
+                self.Type == 'uint16' and
+                (compression == 'jpeg' or pixel_type == 'uint8')
+            )
+            if converted_to_uint8:
                 iiif_pixels.set('Type', 'uint8')
                 iiif_pixels.set('SignificantBits', '8')
                 self.ome_mods['Type'] = 'uint8'
@@ -747,7 +823,8 @@ class OMETiff:
         resolutions: Optional[int] = None,
         compression: str = 'jpeg',
         pixel_type: Optional[str] = None,
-        tile_size: int = 1024
+        tile_size: int = 1024,
+        depth_conversion: str = 'rescale'
     ) -> str:
         """Create a Z-projection OME-TIFF file.
 
@@ -761,6 +838,8 @@ class OMETiff:
             compression: Compression algorithm ('jpeg', 'lzw', etc.).
             pixel_type: Output pixel type ('uint8' or 'uint16').
             tile_size: Tile size in pixels.
+            depth_conversion: Method for converting 16-bit to 8-bit:
+                'equalize', 'rescale', or 'percentile'.
 
         Returns:
             Path to the output file.
@@ -888,12 +967,16 @@ class OMETiff:
             if image.ndim > 2 and image.shape[0] == 1:
                 image = image[0]
 
-            # Convert 16-bit to 8-bit for JPEG
-            if compression == 'jpeg' and series.Type == 'uint16':
-                logger.info(f'Converting from uint16 to uint8')
+            # Convert 16-bit to 8-bit if needed (JPEG requires 8-bit,
+            # or if pixel_type explicitly requests uint8)
+            needs_conversion = (
+                series.Type == 'uint16' and
+                (compression == 'jpeg' or pixel_type == 'uint8')
+            )
+            if needs_conversion:
+                logger.info(f'Converting from uint16 to uint8 using {depth_conversion} method')
                 log_memory('before projection uint16 to uint8 conversion')
-                image = skimage.exposure.equalize_hist(image)
-                image = skimage.util.img_as_ubyte(image)
+                image = convert_depth(image, method=depth_conversion)
                 iiif_pixels.set('Type', 'uint8')
                 iiif_pixels.set('SignificantBits', '8')
                 series.ome_mods['Type'] = 'uint8'
@@ -1323,7 +1406,9 @@ def seadragon_tiffs(
     delete_ome: bool = False,
     compression: str = 'ZSTD',
     tile_size: int = 1024,
-    force_rgb: bool = False
+    force_rgb: bool = False,
+    pixel_type: Optional[str] = None,
+    depth_conversion: str = 'rescale'
 ) -> OMETiff:
     """Convert an image file to IIIF-compatible TIFF files.
 
@@ -1338,6 +1423,10 @@ def seadragon_tiffs(
         compression: Compression method ('jpeg', 'ZSTD', etc.).
         tile_size: Tile size in pixels.
         force_rgb: Force treating image as RGB.
+        pixel_type: Output pixel type ('uint8' or 'uint16'). If None,
+            uses source type (but JPEG always requires uint8).
+        depth_conversion: Method for converting 16-bit to 8-bit:
+            'equalize', 'rescale', or 'percentile'.
 
     Returns:
         OMETiff object containing the processed metadata.
@@ -1395,7 +1484,9 @@ def seadragon_tiffs(
                     z=z,
                     channel_number=channel_number,
                     compression=compression,
-                    tile_size=tile_size
+                    tile_size=tile_size,
+                    pixel_type=pixel_type,
+                    depth_conversion=depth_conversion
                 )
 
     # Write metadata files
@@ -1411,7 +1502,8 @@ def projection_ome_tiff(
     force_rgb: bool = False,
     compression: str = 'jpeg',
     pixel_type: Optional[str] = None,
-    tile_size: int = 1024
+    tile_size: int = 1024,
+    depth_conversion: str = 'rescale'
 ) -> OMETiff:
     """Convert an image file to a Z-projection OME-TIFF.
 
@@ -1422,6 +1514,8 @@ def projection_ome_tiff(
         compression: Compression algorithm.
         pixel_type: Output pixel type ('uint8' or 'uint16').
         tile_size: Tile size in pixels.
+        depth_conversion: Method for converting 16-bit to 8-bit:
+            'equalize', 'rescale', or 'percentile'.
 
     Returns:
         OMETiff object containing the processed metadata.
@@ -1449,7 +1543,8 @@ def projection_ome_tiff(
 
     outfile = ome_contents.generate_projection_ome_tiff(
         filename, projection_type, outdir,
-        compression=compression, pixel_type=pixel_type, tile_size=tile_size
+        compression=compression, pixel_type=pixel_type, tile_size=tile_size,
+        depth_conversion=depth_conversion
     )
 
     log_memory('projection_ome_tiff complete')
@@ -1576,7 +1671,8 @@ def run(
     processing_dir: Optional[str] = None,
     projection_type: Optional[str] = None,
     pixel_type: Optional[str] = None,
-    convert2ome: bool = False
+    convert2ome: bool = False,
+    depth_conversion: str = 'rescale'
 ) -> int:
     """Main entry point for processing image files.
 
@@ -1590,6 +1686,8 @@ def run(
         projection_type: Z-projection type ('min', 'max', 'mean') or None.
         pixel_type: Output pixel type ('uint8', 'uint16') or None.
         convert2ome: If True, convert to standard OME-TIFF.
+        depth_conversion: Method for converting 16-bit to 8-bit:
+            'equalize', 'rescale', or 'percentile'.
 
     Returns:
         0 on success, 1 on error.
@@ -1613,14 +1711,16 @@ def run(
             projection_ome_tiff(
                 imagefile, projection_type,
                 force_rgb=force_rgb, compression=compression,
-                pixel_type=pixel_type, tile_size=tile_size
+                pixel_type=pixel_type, tile_size=tile_size,
+                depth_conversion=depth_conversion
             )
         elif convert2ome:
             convert_to_ome_tiff(imagefile)
         else:
             seadragon_tiffs(
                 imagefile, compression=compression,
-                tile_size=tile_size, force_rgb=force_rgb
+                tile_size=tile_size, force_rgb=force_rgb,
+                pixel_type=pixel_type, depth_conversion=depth_conversion
             )
 
         # Print performance summary
@@ -1662,7 +1762,14 @@ def main() -> None:
     parser.add_argument('--processing_dir', action='store', type=str,
                         help='The temporary directory for the image processing.', default=None)
     parser.add_argument('--pixel_type', action='store', type=str,
-                        help='The type of the pixel. For example uint8.', default=None)
+                        help='The output pixel type (uint8 or uint16).', default=None)
+    parser.add_argument('--depth_conversion', action='store', type=str,
+                        choices=['equalize', 'rescale', 'percentile'],
+                        help='Method for 16-bit to 8-bit conversion: '
+                             'rescale (linear scaling), '
+                             'equalize (histogram equalization), '
+                             'percentile (clip outliers then rescale). Default: rescale',
+                        default='rescale')
 
     args = parser.parse_args()
     run(
@@ -1674,7 +1781,8 @@ def main() -> None:
         processing_dir=args.processing_dir,
         projection_type=args.projection_type,
         pixel_type=args.pixel_type,
-        convert2ome=args.convert2ome
+        convert2ome=args.convert2ome,
+        depth_conversion=args.depth_conversion
     )
 
 

@@ -95,7 +95,7 @@ Run the `extract_scenes` script:
 ```bash
 extract_scenes --help
 
-usage: extract_scenes [-h] [--jpeg_quality JPEG_QUALITY] [--compression COMPRESSION] [--tile_size TILE_SIZE] [--force_rgb FORCE_RGB] [--processing_dir PROCESSING_DIR]  [--projection_type PROJECTION_TYPE] imagefile
+usage: extract_scenes [-h] [--jpeg_quality JPEG_QUALITY] [--compression COMPRESSION] [--tile_size TILE_SIZE] [--force_rgb FORCE_RGB] [--processing_dir PROCESSING_DIR] [--projection_type PROJECTION_TYPE] [--pixel_type PIXEL_TYPE] [--depth_conversion {equalize,rescale,percentile}] imagefile
 
 Tool to extract scenes from an image.
 
@@ -119,8 +119,18 @@ options:
   --processing_dir PROCESSING_DIR
                         The temporary directory for the image processing
   --pixel_type PIXEL_TYPE
-                        The output pixel type (e.g., uint8)
+                        The output pixel type (uint8 or uint16)
+  --depth_conversion {equalize,rescale,percentile}
+                        Method for 16-bit to 8-bit conversion (default: rescale)
 ```
+
+### Pixel Depth Conversion
+
+When converting 16-bit source images to 8-bit output (required for JPEG compression or when `--pixel_type uint8` is specified), you can control the conversion method:
+
+- **rescale** (default): Linear rescaling - divides 16-bit values by 256. Preserves relative intensities between channels.
+- **equalize**: Histogram equalization - redistributes pixel intensities for maximum contrast. May cause washed-out appearance in some channels.
+- **percentile**: Clips values to the 1st-99th percentile range, then rescales to 0-255. Good for images with outliers or hot pixels.
 
 ### Examples
 
@@ -137,6 +147,7 @@ With optional parameters:
 ```bash
 extract_scenes image.tif --processing_dir=/var/scratch/transcoding/tmp
 extract_scenes --projection_type min --pixel_type uint8 --tile_size 512 image.oir
+extract_scenes --pixel_type uint8 --depth_conversion rescale image.lif
 ```
 
 ### Using from Python
@@ -146,6 +157,7 @@ from imagetools import extract_scenes
 
 extract_scenes.run("image.oir")
 extract_scenes.run("image.oir", projection_type="max", pixel_type="uint8")
+extract_scenes.run("image.oir", pixel_type="uint8", depth_conversion="rescale")
 ```
 
 The `extract_scenes.run` function signature:
@@ -160,7 +172,8 @@ def run(
     processing_dir: Optional[str] = None,
     projection_type: Optional[str] = None,  # 'min', 'max', or 'mean'
     pixel_type: Optional[str] = None,       # 'uint8' or 'uint16'
-    convert2ome: bool = False
+    convert2ome: bool = False,
+    depth_conversion: str = 'rescale'       # 'rescale', 'equalize', or 'percentile'
 ) -> int:
 ```
 
