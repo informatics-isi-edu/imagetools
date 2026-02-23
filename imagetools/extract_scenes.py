@@ -63,7 +63,7 @@ DEPTH_CONVERSION_METHODS = ('equalize', 'rescale', 'percentile')
 
 def convert_depth(
     image: np.ndarray,
-    method: str = 'equalize',
+    method: str = 'rescale',
     percentile_low: float = 1.0,
     percentile_high: float = 99.0
 ) -> np.ndarray:
@@ -405,7 +405,7 @@ class OMETiff:
             resolutions: Optional[int] = None,
             compression: str = 'jpeg',
             pixel_type: Optional[str] = None,
-            depth_conversion: str = 'equalize'
+            depth_conversion: str = 'rescale'
         ) -> None:
             """Create an IIIF-compatible TIFF file for a single image plane.
 
@@ -824,7 +824,7 @@ class OMETiff:
         compression: str = 'jpeg',
         pixel_type: Optional[str] = None,
         tile_size: int = 1024,
-        depth_conversion: str = 'equalize'
+        depth_conversion: str = 'rescale'
     ) -> str:
         """Create a Z-projection OME-TIFF file.
 
@@ -1408,7 +1408,7 @@ def seadragon_tiffs(
     tile_size: int = 1024,
     force_rgb: bool = False,
     pixel_type: Optional[str] = None,
-    depth_conversion: str = 'equalize'
+    depth_conversion: str = 'rescale'
 ) -> OMETiff:
     """Convert an image file to IIIF-compatible TIFF files.
 
@@ -1503,7 +1503,7 @@ def projection_ome_tiff(
     compression: str = 'jpeg',
     pixel_type: Optional[str] = None,
     tile_size: int = 1024,
-    depth_conversion: str = 'equalize'
+    depth_conversion: str = 'rescale'
 ) -> OMETiff:
     """Convert an image file to a Z-projection OME-TIFF.
 
@@ -1672,7 +1672,7 @@ def run(
     projection_type: Optional[str] = None,
     pixel_type: Optional[str] = None,
     convert2ome: bool = False,
-    depth_conversion: str = 'equalize'
+    depth_conversion: str = 'rescale'
 ) -> int:
     """Main entry point for processing image files.
 
@@ -1766,10 +1766,10 @@ def main() -> None:
     parser.add_argument('--depth_conversion', action='store', type=str,
                         choices=['equalize', 'rescale', 'percentile'],
                         help='Method for 16-bit to 8-bit conversion: '
-                             'equalize (histogram equalization), '
                              'rescale (linear scaling), '
-                             'percentile (clip outliers then rescale). Default: equalize',
-                        default='equalize')
+                             'equalize (histogram equalization), '
+                             'percentile (clip outliers then rescale). Default: rescale',
+                        default='rescale')
 
     args = parser.parse_args()
     run(

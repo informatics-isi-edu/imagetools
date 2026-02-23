@@ -121,15 +121,15 @@ options:
   --pixel_type PIXEL_TYPE
                         The output pixel type (uint8 or uint16)
   --depth_conversion {equalize,rescale,percentile}
-                        Method for 16-bit to 8-bit conversion (default: equalize)
+                        Method for 16-bit to 8-bit conversion (default: rescale)
 ```
 
 ### Pixel Depth Conversion
 
 When converting 16-bit source images to 8-bit output (required for JPEG compression or when `--pixel_type uint8` is specified), you can control the conversion method:
 
-- **equalize** (default): Histogram equalization - redistributes pixel intensities for maximum contrast. Best for images with low dynamic range.
-- **rescale**: Linear rescaling - divides 16-bit values by 256. Preserves relative intensities but may lose detail in low-contrast images.
+- **rescale** (default): Linear rescaling - divides 16-bit values by 256. Preserves relative intensities between channels.
+- **equalize**: Histogram equalization - redistributes pixel intensities for maximum contrast. May cause washed-out appearance in some channels.
 - **percentile**: Clips values to the 1st-99th percentile range, then rescales to 0-255. Good for images with outliers or hot pixels.
 
 ### Examples
@@ -173,7 +173,7 @@ def run(
     projection_type: Optional[str] = None,  # 'min', 'max', or 'mean'
     pixel_type: Optional[str] = None,       # 'uint8' or 'uint16'
     convert2ome: bool = False,
-    depth_conversion: str = 'equalize'      # 'equalize', 'rescale', or 'percentile'
+    depth_conversion: str = 'rescale'       # 'rescale', 'equalize', or 'percentile'
 ) -> int:
 ```
 
