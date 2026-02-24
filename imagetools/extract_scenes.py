@@ -60,6 +60,9 @@ logger = logging.getLogger(__name__)
 # Valid depth conversion methods
 DEPTH_CONVERSION_METHODS = ('equalize', 'rescale', 'percentile')
 
+# Valid rotation angles
+VALID_ROTATIONS = (0, 90, 180, 270)
+
 
 def convert_depth(
     image: np.ndarray,
@@ -418,7 +421,8 @@ class OMETiff:
             resolutions: Optional[int] = None,
             compression: str = 'jpeg',
             pixel_type: Optional[str] = None,
-            depth_conversion: str = 'rescale'
+            depth_conversion: str = 'rescale',
+            rotation: int = 0
         ) -> None:
             """Create an IIIF-compatible TIFF file for a single image plane.
 
@@ -437,6 +441,7 @@ class OMETiff:
                 depth_conversion: Method for converting 16-bit to 8-bit:
                     'equalize' (histogram equalization), 'rescale' (linear),
                     or 'percentile' (clip outliers then rescale).
+                rotation: Rotation angle in degrees (0, 90, 180, or 270).
                     Defaults to enough levels for 1K pixels at top.
                 compression: Compression algorithm ('jpeg', 'lzw', etc.).
             """
@@ -574,6 +579,14 @@ class OMETiff:
                 xres = round(10 / physical_size[0])  # Convert cm to mm
                 yres = round(10 / physical_size[1])
                 vips_image = vips_image.copy(xres=xres, yres=yres)
+
+            # Apply rotation if specified
+            if rotation == 90:
+                vips_image = vips_image.rot90()
+            elif rotation == 180:
+                vips_image = vips_image.rot180()
+            elif rotation == 270:
+                vips_image = vips_image.rot270()
 
             logger.info(f'writing pyramidal TIFF with pyvips...')
             log_memory('before pyvips write')
@@ -837,7 +850,8 @@ class OMETiff:
         compression: str = 'jpeg',
         pixel_type: Optional[str] = None,
         tile_size: int = 1024,
-        depth_conversion: str = 'rescale'
+        depth_conversion: str = 'rescale',
+        rotation: int = 0
     ) -> str:
         """Create a Z-projection OME-TIFF file.
 
@@ -853,6 +867,7 @@ class OMETiff:
             tile_size: Tile size in pixels.
             depth_conversion: Method for converting 16-bit to 8-bit:
                 'equalize', 'rescale', or 'percentile'.
+            rotation: Rotation angle in degrees (0, 90, 180, or 270).
 
         Returns:
             Path to the output file.
@@ -1035,6 +1050,14 @@ class OMETiff:
                 xres = round(10 / physical_size[0])
                 yres = round(10 / physical_size[1])
                 vips_image = vips_image.copy(xres=xres, yres=yres)
+
+            # Apply rotation if specified
+            if rotation == 90:
+                vips_image = vips_image.rot90()
+            elif rotation == 180:
+                vips_image = vips_image.rot180()
+            elif rotation == 270:
+                vips_image = vips_image.rot270()
 
             # Set up write options
             write_options = {
@@ -1421,7 +1444,8 @@ def seadragon_tiffs(
     tile_size: int = 1024,
     force_rgb: bool = False,
     pixel_type: Optional[str] = None,
-    depth_conversion: str = 'rescale'
+    depth_conversion: str = 'rescale',
+    rotation: int = 0
 ) -> OMETiff:
     """Convert an image file to IIIF-compatible TIFF files.
 
@@ -1440,6 +1464,7 @@ def seadragon_tiffs(
             uses source type (but JPEG always requires uint8).
         depth_conversion: Method for converting 16-bit to 8-bit:
             'equalize', 'rescale', or 'percentile'.
+        rotation: Rotation angle in degrees (0, 90, 180, or 270).
 
     Returns:
         OMETiff object containing the processed metadata.
@@ -1499,7 +1524,8 @@ def seadragon_tiffs(
                     compression=compression,
                     tile_size=tile_size,
                     pixel_type=pixel_type,
-                    depth_conversion=depth_conversion
+                    depth_conversion=depth_conversion,
+                    rotation=rotation
                 )
 
     # Write metadata files
@@ -1516,7 +1542,8 @@ def projection_ome_tiff(
     compression: str = 'jpeg',
     pixel_type: Optional[str] = None,
     tile_size: int = 1024,
-    depth_conversion: str = 'rescale'
+    depth_conversion: str = 'rescale',
+    rotation: int = 0
 ) -> OMETiff:
     """Convert an image file to a Z-projection OME-TIFF.
 
@@ -1529,6 +1556,7 @@ def projection_ome_tiff(
         tile_size: Tile size in pixels.
         depth_conversion: Method for converting 16-bit to 8-bit:
             'equalize', 'rescale', or 'percentile'.
+        rotation: Rotation angle in degrees (0, 90, 180, or 270).
 
     Returns:
         OMETiff object containing the processed metadata.
@@ -1557,7 +1585,7 @@ def projection_ome_tiff(
     outfile = ome_contents.generate_projection_ome_tiff(
         filename, projection_type, outdir,
         compression=compression, pixel_type=pixel_type, tile_size=tile_size,
-        depth_conversion=depth_conversion
+        depth_conversion=depth_conversion, rotation=rotation
     )
 
     log_memory('projection_ome_tiff complete')
@@ -1685,7 +1713,8 @@ def run(
     projection_type: Optional[str] = None,
     pixel_type: Optional[str] = None,
     convert2ome: bool = False,
-    depth_conversion: str = 'rescale'
+    depth_conversion: str = 'rescale',
+    rotation: int = 0
 ) -> int:
     """Main entry point for processing image files.
 
@@ -1701,6 +1730,7 @@ def run(
         convert2ome: If True, convert to standard OME-TIFF.
         depth_conversion: Method for converting 16-bit to 8-bit:
             'equalize', 'rescale', or 'percentile'.
+        rotation: Rotation angle in degrees (0, 90, 180, or 270).
 
     Returns:
         0 on success, 1 on error.
@@ -1725,7 +1755,7 @@ def run(
                 imagefile, projection_type,
                 force_rgb=force_rgb, compression=compression,
                 pixel_type=pixel_type, tile_size=tile_size,
-                depth_conversion=depth_conversion
+                depth_conversion=depth_conversion, rotation=rotation
             )
         elif convert2ome:
             convert_to_ome_tiff(imagefile)
@@ -1733,7 +1763,8 @@ def run(
             seadragon_tiffs(
                 imagefile, compression=compression,
                 tile_size=tile_size, force_rgb=force_rgb,
-                pixel_type=pixel_type, depth_conversion=depth_conversion
+                pixel_type=pixel_type, depth_conversion=depth_conversion,
+                rotation=rotation
             )
 
         # Print performance summary
@@ -1783,6 +1814,10 @@ def main() -> None:
                              'equalize (histogram equalization), '
                              'percentile (clip outliers then rescale). Default: rescale',
                         default='rescale')
+    parser.add_argument('--rotation', action='store', type=int,
+                        choices=[0, 90, 180, 270],
+                        help='Rotate output image by specified degrees (0, 90, 180, or 270). Default: 0',
+                        default=0)
 
     args = parser.parse_args()
     run(
@@ -1795,7 +1830,8 @@ def main() -> None:
         projection_type=args.projection_type,
         pixel_type=args.pixel_type,
         convert2ome=args.convert2ome,
-        depth_conversion=args.depth_conversion
+        depth_conversion=args.depth_conversion,
+        rotation=args.rotation
     )
 
 

@@ -95,7 +95,7 @@ Run the `extract_scenes` script:
 ```bash
 extract_scenes --help
 
-usage: extract_scenes [-h] [--jpeg_quality JPEG_QUALITY] [--compression COMPRESSION] [--tile_size TILE_SIZE] [--force_rgb FORCE_RGB] [--processing_dir PROCESSING_DIR] [--projection_type PROJECTION_TYPE] [--pixel_type PIXEL_TYPE] [--depth_conversion {equalize,rescale,percentile}] imagefile
+usage: extract_scenes [-h] [--jpeg_quality JPEG_QUALITY] [--compression COMPRESSION] [--tile_size TILE_SIZE] [--force_rgb FORCE_RGB] [--processing_dir PROCESSING_DIR] [--projection_type PROJECTION_TYPE] [--pixel_type PIXEL_TYPE] [--depth_conversion {equalize,rescale,percentile}] [--rotation {0,90,180,270}] imagefile
 
 Tool to extract scenes from an image.
 
@@ -122,6 +122,8 @@ options:
                         The output pixel type (uint8 or uint16)
   --depth_conversion {equalize,rescale,percentile}
                         Method for 16-bit to 8-bit conversion (default: rescale)
+  --rotation {0,90,180,270}
+                        Rotate output image by specified degrees (default: 0)
 ```
 
 ### Pixel Depth Conversion
@@ -131,6 +133,14 @@ When converting 16-bit source images to 8-bit output (required for JPEG compress
 - **rescale** (default): Linear rescaling - divides 16-bit values by 256. Preserves relative intensities between channels.
 - **equalize**: Histogram equalization - redistributes pixel intensities for maximum contrast. May cause washed-out appearance in some channels.
 - **percentile**: Clips values to the 1st-99th percentile range, then rescales to 0-255. Good for images with outliers or hot pixels.
+
+### Image Rotation
+
+The `--rotation` option allows rotating the output image by 0, 90, 180, or 270 degrees. This is useful when the source image orientation doesn't match the desired display orientation.
+
+```bash
+extract_scenes --rotation 180 image.tiff
+```
 
 ### Examples
 
@@ -158,6 +168,7 @@ from imagetools import extract_scenes
 extract_scenes.run("image.oir")
 extract_scenes.run("image.oir", projection_type="max", pixel_type="uint8")
 extract_scenes.run("image.oir", pixel_type="uint8", depth_conversion="rescale")
+extract_scenes.run("image.oir", rotation=180)
 ```
 
 The `extract_scenes.run` function signature:
@@ -173,7 +184,8 @@ def run(
     projection_type: Optional[str] = None,  # 'min', 'max', or 'mean'
     pixel_type: Optional[str] = None,       # 'uint8' or 'uint16'
     convert2ome: bool = False,
-    depth_conversion: str = 'rescale'       # 'rescale', 'equalize', or 'percentile'
+    depth_conversion: str = 'rescale',      # 'rescale', 'equalize', or 'percentile'
+    rotation: int = 0                       # 0, 90, 180, or 270
 ) -> int:
 ```
 
