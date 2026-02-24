@@ -90,14 +90,25 @@ def convert_depth(
             f"Valid options: {DEPTH_CONVERSION_METHODS}"
         )
 
-    if image.dtype != np.uint16:
-        # Already 8-bit or other format, just convert
-        return skimage.util.img_as_ubyte(image)
+    # Handle non-uint16 input
+    if image.dtype == np.uint8:
+        # Already 8-bit, return as-is
+        return image
+    elif image.dtype != np.uint16:
+        # Other format (float, etc.) - convert to uint8 via rescaling
+        if np.issubdtype(image.dtype, np.floating):
+            # Assume float is in 0-1 range
+            return (np.clip(image, 0, 1) * 255).astype(np.uint8)
+        else:
+            # Unknown integer type - try simple conversion
+            return image.astype(np.uint8)
 
+    # uint16 input - apply the specified conversion method
     if method == 'equalize':
         # Histogram equalization - maximizes contrast
         image = skimage.exposure.equalize_hist(image)
-        return skimage.util.img_as_ubyte(image)
+        # equalize_hist returns float64 in range 0-1
+        return (image * 255).astype(np.uint8)
 
     elif method == 'rescale':
         # Linear rescaling from full uint16 range
@@ -114,6 +125,8 @@ def convert_depth(
         else:
             scaled = np.zeros_like(clipped, dtype=np.float64)
         return scaled.astype(np.uint8)
+
+
 FORMAT = "[%(filename)s:%(lineno)s - %(funcName)20s() ] %(message)s"
 
 # External command paths - these should be on PATH after running setup_prerequisites.sh
