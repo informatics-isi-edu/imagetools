@@ -542,6 +542,9 @@ class OMETiff:
             else:
                 vips_image = pyvips.Image.arrayjoin(row_images, across=1)
 
+            # Crop to original dimensions (arrayjoin pads edge tiles to uniform size)
+            vips_image = vips_image.crop(0, 0, width, height)
+
             log_memory('after building pyvips image from tiles')
 
             # Update OME-XML for format changes
