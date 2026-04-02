@@ -1224,7 +1224,15 @@ class OMETiff:
             planes = pixels.findall('ome:Plane', self.ns)
 
             if len(planes) == 0:
-                pixels.append(generate_tiffdata(0, 0, 0))
+                # No Plane elements in source XML (common for .ims, .lif, .czi).
+                # Generate TiffData for every z/c/t combination from Pixels attrs.
+                size_z = int(pixels.get('SizeZ', '1'))
+                size_c = int(pixels.get('SizeC', '1'))
+                size_t = int(pixels.get('SizeT', '1'))
+                for t in range(size_t):
+                    for z in range(size_z):
+                        for c in range(size_c):
+                            pixels.append(generate_tiffdata(c, z, t))
             else:
                 plane_index = list(pixels).index(planes[0])
                 for plane in planes:
