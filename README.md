@@ -124,7 +124,12 @@ options:
                         Method for 16-bit to 8-bit conversion (default: rescale)
   --rotation {0,90,180,270}
                         Rotate output image by specified degrees (default: 0)
+  --generate_companion  Also generate OME-XML companion files (off by default)
 ```
+
+### OME-XML Companion Files
+
+By default `extract_scenes` does NOT generate the `*.companion.ome` files (main, per-series, and per-Z). The `.json` (`series_details`) metadata is always written and carries the source metadata the pipeline consumes. Pass `--generate_companion` to write them anyway (e.g. for OME-aware tools). They are deterministically regenerable from the source, so skipping them loses no data.
 
 ### Pixel Depth Conversion
 
@@ -185,7 +190,8 @@ def run(
     pixel_type: Optional[str] = None,       # 'uint8' or 'uint16'
     convert2ome: bool = False,
     depth_conversion: str = 'rescale',      # 'rescale', 'equalize', or 'percentile'
-    rotation: int = 0                       # 0, 90, 180, or 270
+    rotation: int = 0,                      # 0, 90, 180, or 270
+    generate_companion: bool = False        # also write OME-XML companion files
 ) -> int:
 ```
 
