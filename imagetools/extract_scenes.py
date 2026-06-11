@@ -1157,15 +1157,25 @@ class OMETiff:
             omejson.append(i)
         return omejson
 
-    def dump(self, filename: str) -> None:
-        """Write OME-XML, JSON metadata, and companion files.
+    def dump(self, filename: str, generate_companion: bool = False) -> None:
+        """Write JSON metadata, and optionally OME-XML companion files.
+
+        The `.json` (series_details) is always written; it is the metadata the
+        pipeline consumes. The companion OME-XML files are only written when
+        `generate_companion` is True (default off) since nothing in the viewer
+        stack reads them.
 
         Args:
             filename: Base filename for output files.
+            generate_companion: If True, also write the OME-XML companion files
+                (main, per-series, per-Z). Defaults to False.
         """
         # Write JSON metadata
         with open(filename + '.json', 'w') as f:
             f.write(json.dumps(self._json_metadata(), indent=4))
+
+        if not generate_companion:
+            return
 
         # Write main companion file
         self.multifile_omexml().write(filename + '.companion.ome',
@@ -1456,7 +1466,8 @@ def seadragon_tiffs(
     force_rgb: bool = False,
     pixel_type: Optional[str] = None,
     depth_conversion: str = 'rescale',
-    rotation: int = 0
+    rotation: int = 0,
+    generate_companion: bool = False
 ) -> OMETiff:
     """Convert an image file to IIIF-compatible TIFF files.
 
@@ -1540,7 +1551,7 @@ def seadragon_tiffs(
                 )
 
     # Write metadata files
-    ome_contents.dump(filename)
+    ome_contents.dump(filename, generate_companion=generate_companion)
     log_memory('seadragon_tiffs complete')
     log_top_memory_allocations(10)
     return ome_contents
@@ -1725,7 +1736,8 @@ def run(
     pixel_type: Optional[str] = None,
     convert2ome: bool = False,
     depth_conversion: str = 'rescale',
-    rotation: int = 0
+    rotation: int = 0,
+    generate_companion: bool = False,
 ) -> int:
     """Main entry point for processing image files.
 
@@ -1742,6 +1754,8 @@ def run(
         depth_conversion: Method for converting 16-bit to 8-bit:
             'equalize', 'rescale', or 'percentile'.
         rotation: Rotation angle in degrees (0, 90, 180, or 270).
+        generate_companion: If True, also write OME-XML companion files.
+            Defaults to False (nothing in the viewer stack consumes them).
 
     Returns:
         0 on success, 1 on error.
@@ -1775,7 +1789,7 @@ def run(
                 imagefile, compression=compression,
                 tile_size=tile_size, force_rgb=force_rgb,
                 pixel_type=pixel_type, depth_conversion=depth_conversion,
-                rotation=rotation
+                rotation=rotation, generate_companion=generate_companion,
             )
 
         # Print performance summary
@@ -1829,6 +1843,8 @@ def main() -> None:
                         choices=[0, 90, 180, 270],
                         help='Rotate output image by specified degrees (0, 90, 180, or 270). Default: 0',
                         default=0)
+    parser.add_argument('--generate_companion', action='store_true', default=False,
+                        help='Also generate OME-XML companion files (off by default).')
 
     args = parser.parse_args()
     run(
@@ -1842,7 +1858,8 @@ def main() -> None:
         pixel_type=args.pixel_type,
         convert2ome=args.convert2ome,
         depth_conversion=args.depth_conversion,
-        rotation=args.rotation
+        rotation=args.rotation,
+        generate_companion=args.generate_companion,
     )
 
 
