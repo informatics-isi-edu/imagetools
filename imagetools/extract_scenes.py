@@ -147,6 +147,10 @@ Z_OME_FILE = "{file}_S{s}_Z{z}.ome.tif"
 PROJECTION_FILE = "{file}.tif"
 OME_TIF_FILE = "{file}.ome.tif"
 
+# Formats that libvips can read directly via the openslide loader. Images in this set that are
+# already pyramidal + simple (8-bit, RGB) can skip the bioformats2raw->zarr round trip (openslide path).
+OPENSLIDE_SUFFIXES = {'.svs', '.ndpi', '.scn', '.mrxs', '.vms', '.vmu', '.svslide', '.bif'}
+
 # Global counters for formatting Z-index and channel strings
 NUMBER_OF_Z_INDEX: Optional[int] = None
 NUMBER_OF_CHANNELS: Optional[int] = None
@@ -234,6 +238,17 @@ def log_top_memory_allocations(limit: int = 10) -> None:
     logger.info(f'[MEMORY] Top {limit} memory allocations:')
     for idx, stat in enumerate(top_stats[:limit], 1):
         logger.info(f'[MEMORY]   #{idx}: {stat}')
+
+
+def _log_perf(name: str, start_time: float, start_usage: Any) -> None:
+    """Log a per-series write's execution time and max-RSS delta. Shared by generate_iiif_tiff
+    and write_iiif_tiff_openslide."""
+    end_usage = resource.getrusage(resource.RUSAGE_SELF)
+    end_rss = end_usage.ru_maxrss / (2 ** 20 if platform.system() == 'Linux' else 2 ** 30)
+    delta_rss = end_rss - (start_usage.ru_maxrss / (2 ** 20 if platform.system() == 'Linux' else 2 ** 30))
+    logger.info(
+        f'{name} execution time: {time.time() - start_time:.2f} rss: {end_rss:.2f} delta rss {delta_rss:.2f}'
+    )
 
 
 class OMETiff:
@@ -453,7 +468,6 @@ class OMETiff:
 
             # Prepare OME-XML metadata
             iiif_omexml = self.iiif_omexml(z, channel_number)
-            iiif_pixels = iiif_omexml.getroot().find('.//ome:Pixels', self.ns)
 
             # Get zarr array info
             zarr_arr = self.zarr_series['0']
@@ -547,6 +561,31 @@ class OMETiff:
 
             log_memory('after building pyvips image from tiles')
 
+            self._write_iiif_tiff(
+                vips_image, outfile, iiif_omexml, compression=compression,
+                tile_size=tile_size, pixel_type=pixel_type, rotation=rotation)
+
+            # Clean up
+            del vips_image, row_images
+            gc.collect()
+            log_memory('after cleanup')
+
+            _log_perf('generate_iiif_tiff', start_time, start_usage)
+
+        def _write_iiif_tiff(
+            self,
+            vips_image: 'pyvips.Image',
+            outfile: str,
+            iiif_omexml: ET.ElementTree,
+            compression: str = 'jpeg',
+            tile_size: int = 1024,
+            pixel_type: Optional[str] = None,
+            rotation: int = 0
+        ) -> None:
+            """Write a prepared pyvips image as a pyramidal, tiled IIIF OME-TIFF. Shared by
+            generate_iiif_tiff (pixels from zarr tiles) and the openslide path."""
+            iiif_pixels = iiif_omexml.getroot().find('.//ome:Pixels', self.ns)
+
             # Update OME-XML for format changes
             converted_to_uint8 = (
                 self.Type == 'uint16' and
@@ -596,21 +635,42 @@ class OMETiff:
             vips_image.tiffsave(outfile, **write_options)
             log_memory('after pyvips write')
 
-            # Clean up
-            del vips_image, row_images
-            gc.collect()
-            log_memory('after cleanup')
-
             # Add OME-XML data (requires separate call due to unicode encoding)
             set_omexml(outfile, iiif_omexml)
 
-            # Log performance metrics
-            end_usage = resource.getrusage(resource.RUSAGE_SELF)
-            end_rss = end_usage.ru_maxrss / (2 ** 20 if platform.system() == 'Linux' else 2 ** 30)
-            delta_rss = end_rss - (start_usage.ru_maxrss / (2 ** 20 if platform.system() == 'Linux' else 2 ** 30))
-            logger.info(
-                f'generate_iiif_tiff execution time: {time.time() - start_time:.2f} rss: {end_rss:.2f} delta rss {delta_rss:.2f}'
-            )
+        def write_iiif_tiff_openslide(
+            self,
+            filename: str,
+            image_path: str,
+            tile_size: int = 1024,
+            compression: str = 'jpeg',
+            rotation: int = 0
+        ) -> None:
+            """Openslide path: produce this series' IIIF TIFF straight from the slide via openslide,
+            reusing the shared writer. No bioformats2raw/zarr round trip; valid only for the
+            already-pyramidal 8-bit RGB case (guaranteed by openslide_eligible). Instrumented the
+            same way as generate_iiif_tiff."""
+            start_time = time.time()
+            start_usage = resource.getrusage(resource.RUSAGE_SELF)
+            outfile = IIIF_FILE.format(file=filename, s=self.Number, z=z_string(0), c=c_string(0))
+
+            log_memory(f'write_iiif_tiff_openslide start (s={self.Number})')
+
+            # openslide always returns RGBA; drop the alpha to match the bioformats RGB output.
+            vips_image = pyvips.Image.openslideload(image_path, level=0)
+            if vips_image.bands == 4:
+                vips_image = vips_image[0:3]
+
+            self._write_iiif_tiff(
+                vips_image, outfile, self.iiif_omexml(0, 0),
+                compression=compression, tile_size=tile_size, rotation=rotation)
+
+            # Clean up
+            del vips_image
+            gc.collect()
+            log_memory('after cleanup')
+
+            _log_perf('write_iiif_tiff_openslide', start_time, start_usage)
 
         def iiif_omexml(
             self,
@@ -807,28 +867,7 @@ class OMETiff:
         log_memory('after opening zarr file')
 
         # Parse OME-XML metadata, handling namespace issues
-        try:
-            self.omexml = ET.parse(f"{os.path.dirname(filename)}/SOURCEMETADATA.ome.xml")
-        except Exception:
-            self.add_xml_namespace_prefix(
-                f"{os.path.dirname(filename)}/SOURCEMETADATA.ome.xml",
-                'xmlns="http://www.openmicroscopy.org/Schemas/OME/2016-06" ',
-                'xmlns:ome="http://www.openmicroscopy.org/Schemas/OME/2016-06" '
-            )
-            self.omexml = ET.parse(f"{os.path.dirname(filename)}/SOURCEMETADATA.ome.xml")
-
-        # Clean up metadata - remove MetadataOnly and TiffData elements
-        for pixels in self.omexml.findall('.//ome:Pixels', self.ns):
-            for e in pixels.findall('.//ome:MetadataOnly', self.ns):
-                pixels.remove(e)
-            tiff_data = pixels.findall('.//ome:TiffData', self.ns)
-            for td in tiff_data:
-                pixels.remove(td)
-
-        # Register XML namespaces
-        ET.register_namespace('', self.ns['ome'])
-        for k, v in self.ns.items():
-            ET.register_namespace(k, v)
+        self._load_source_metadata(f"{os.path.dirname(filename)}/SOURCEMETADATA.ome.xml")
 
         # Create series objects for each non-OME group in zarr
         for series_number, series in self.zarr_data.groups():
@@ -843,6 +882,70 @@ class OMETiff:
             for z in range(i.SizeZ):
                 for c in range(i.SizeC):
                     self.uuid[(i.Number, z, c)] = uuid.uuid1()
+
+    def _load_source_metadata(self, meta_path: str) -> None:
+        """Parse the showinf SOURCEMETADATA OME-XML at `meta_path` into self.omexml. Shared by
+        __init__ (zarr path) and from_openslide (openslide path)."""
+        try:
+            self.omexml = ET.parse(meta_path)
+        except Exception:
+            self.add_xml_namespace_prefix(
+                meta_path,
+                'xmlns="http://www.openmicroscopy.org/Schemas/OME/2016-06" ',
+                'xmlns:ome="http://www.openmicroscopy.org/Schemas/OME/2016-06" '
+            )
+            self.omexml = ET.parse(meta_path)
+
+        # Clean up metadata - remove MetadataOnly and TiffData elements
+        for pixels in self.omexml.findall('.//ome:Pixels', self.ns):
+            for e in pixels.findall('.//ome:MetadataOnly', self.ns):
+                pixels.remove(e)
+            tiff_data = pixels.findall('.//ome:TiffData', self.ns)
+            for td in tiff_data:
+                pixels.remove(td)
+
+        # Register XML namespaces
+        ET.register_namespace('', self.ns['ome'])
+        for k, v in self.ns.items():
+            ET.register_namespace(k, v)
+
+    @classmethod
+    def from_openslide(cls, image_path: str, outdir: str) -> 'OMETiff':
+        """Build an OMETiff from showinf metadata only (no zarr), for the openslide path.
+
+        The metadata layer is decoupled from zarr (all series attributes come from the OME-XML),
+        so we source it from showinf and let the pixels come straight from the slide via
+        OMETiffSeries.write_iiif_tiff_openslide -- skipping the bioformats2raw->zarr decode. Only
+        non-thumbnail series are kept (the main image); label/macro thumbnails (discarded downstream
+        anyway) are not reproduced.
+        """
+        self = cls.__new__(cls)
+        self.filename = image_path
+        self.filebase = os.path.splitext(os.path.basename(image_path))[0]
+        self.uuid = {}
+        self.series = []
+        self.ns = {
+            'ome': 'http://www.openmicroscopy.org/Schemas/OME/2016-06',
+            'xsi': "http://www.w3.org/2001/XMLSchema-instance"
+        }
+
+        # Bio-Formats metadata via showinf (cheap), beside the output like the zarr path.
+        meta_path = f'{outdir}/SOURCEMETADATA.ome.xml'
+        with open(meta_path, 'w') as metadata:
+            metadata.write(cls.source_metadata(image_path))
+        self._load_source_metadata(meta_path)
+
+        # Series come from the OME-XML Image elements (not zarr groups); drop label/macro thumbnails.
+        for n in range(len(self.omexml.getroot().findall('.//ome:Image', self.ns))):
+            series = OMETiff.OMETiffSeries(self, n, None)   # no zarr group; metadata from OME-XML
+            if not series.Thumbnail:
+                self.series.append(series)
+
+        for i in self.series:
+            for z in range(i.SizeZ):
+                for c in range(i.SizeC):
+                    self.uuid[(i.Number, z, c)] = uuid.uuid1()
+        return self
 
     def generate_projection_ome_tiff(
         self,
@@ -1457,6 +1560,90 @@ def c_string(c: int) -> str:
     return ('0' * c_length + str(c))[-c_length:]
 
 
+def openslide_eligible(
+    image_path: str,
+    generate_companion: bool = False,
+    pixel_type: Optional[str] = None,
+    projection_type: Optional[str] = None,
+    convert2ome: bool = False,
+    force_rgb: bool = False
+) -> bool:
+    """Whether `image_path` can use the openslide path (skip bioformats2raw->zarr).
+
+    BOTH the requested options and the image must be supportable. If any option can't be honored
+    by the openslide path, or the image isn't an already-pyramidal 8-bit RGB slide, return False and let
+    the caller fall back to the standard bioformats path.
+    """
+    # Argument gate: options the openslide path cannot honor.
+    if generate_companion:            # openslide path does not build the OME companion model
+        return False
+    if convert2ome:                   # different output (standard OME-TIFF)
+        return False
+    if projection_type is not None:   # Z-projection needs the full multi-Z decode
+        return False
+    if pixel_type == 'uint16':        # openslide path emits 8-bit only
+        return False
+    if force_rgb:                     # channel remapping -> let bioformats handle it
+        return False
+
+    # Format gate: openslide-readable extension.
+    if os.path.splitext(image_path)[1].lower() not in OPENSLIDE_SUFFIXES:
+        return False
+
+    # Image gate: openslide opens it and it is 8-bit RGB(A).
+    try:
+        img = pyvips.Image.openslideload(image_path, level=0)
+    except Exception as e:
+        logger.info(f'openslide path not eligible (openslide cannot open {image_path}): {e}')
+        return False
+    if img.format != 'uchar' or img.bands not in (3, 4):
+        logger.info(f'openslide path not eligible ({image_path}: format={img.format} bands={img.bands})')
+        return False
+    return True
+
+
+def seadragon_tiffs_openslide(
+    image_path: str,
+    compression: str = 'jpeg',
+    tile_size: int = 1024,
+    rotation: int = 0,
+    generate_companion: bool = False
+) -> OMETiff:
+    """Openslide path of seadragon_tiffs for already-pyramidal slides (e.g. .svs).
+
+    Reads the slide directly via libvips/openslide and writes the pyramidal OME-TIFF for the main
+    full-res series, skipping the bioformats2raw->zarr round trip. Emits the same `.json` metadata
+    as the standard path (sourced from showinf). Call only when `openslide_eligible` is True.
+    """
+    global NUMBER_OF_Z_INDEX, NUMBER_OF_CHANNELS
+    log_memory(f'seadragon_tiffs_openslide start ({image_path})')
+    image_file = os.path.basename(image_path)
+    filename, _ext = os.path.splitext(image_file)
+    outdir = f"{filename}"
+
+    # Create output directory
+    try:
+        os.mkdir(outdir)
+    except FileExistsError:
+        pass
+
+    ome_contents = OMETiff.from_openslide(image_path, outdir)
+    out_base = f'{outdir}/{filename}'
+    for series in ome_contents.series:
+        # Drive z/c filename zero-padding the same way seadragon_tiffs does.
+        if NUMBER_OF_Z_INDEX is None:
+            NUMBER_OF_Z_INDEX = series.SizeZ
+        if NUMBER_OF_CHANNELS is None:
+            NUMBER_OF_CHANNELS = len(series.Channels)
+        series.write_iiif_tiff_openslide(
+            out_base, image_path, tile_size=tile_size, compression=compression, rotation=rotation)
+
+    ome_contents.dump(out_base, generate_companion=generate_companion)
+    log_memory('seadragon_tiffs_openslide complete')
+    log_top_memory_allocations(10)
+    return ome_contents
+
+
 def seadragon_tiffs(
     image_path: str,
     z_planes: Optional[str] = None,
@@ -1784,6 +1971,15 @@ def run(
             )
         elif convert2ome:
             convert_to_ome_tiff(imagefile)
+        elif openslide_eligible(
+            imagefile, generate_companion=generate_companion, pixel_type=pixel_type,
+            projection_type=projection_type, convert2ome=convert2ome, force_rgb=force_rgb
+        ):
+            logger.info(f'using openslide path for {imagefile}')
+            seadragon_tiffs_openslide(
+                imagefile, compression=compression, tile_size=tile_size,
+                rotation=rotation, generate_companion=generate_companion,
+            )
         else:
             seadragon_tiffs(
                 imagefile, compression=compression,
