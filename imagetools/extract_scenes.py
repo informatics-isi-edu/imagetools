@@ -64,6 +64,18 @@ DEPTH_CONVERSION_METHODS = ('equalize', 'rescale', 'percentile')
 VALID_ROTATIONS = (0, 90, 180, 270)
 
 
+def as_native(array: np.ndarray) -> np.ndarray:
+    """Return `array` in the machine's native byte order, copying only when needed.
+
+    bioformats2raw records an explicit byte order in the zarr (0.11.0/jzarr writes big-endian
+    '>u2'; 0.12.0/zarr-java writes little-endian '<u2'), so what a read returns depends on the
+    writer, not on this machine. Both numpy dtype comparisons (`dtype == np.uint16` is only ever
+    true for native order) and pyvips (`new_from_memory` has no byte-order parameter and reads the
+    buffer as host-native) require native order, so normalize on read instead of assuming.
+    """
+    return array if array.dtype.isnative else array.astype(array.dtype.newbyteorder('='))
+
+
 def convert_depth(
     image: np.ndarray,
     method: str = 'rescale',
@@ -505,12 +517,12 @@ class OMETiff:
                     x1 = min(x0 + chunk_w, width)
                     tile_h, tile_w = y1 - y0, x1 - x0
 
-                    # Load tile from zarr (TCZYX format)
+                    # Load tile from zarr (TCZYX format), normalized to native byte order
                     if self.RGB or self.Thumbnail:
-                        tile = zarr_arr[0, :, z, y0:y1, x0:x1]  # (3, h, w)
+                        tile = as_native(zarr_arr[0, :, z, y0:y1, x0:x1])  # (3, h, w)
                         tile = np.moveaxis(tile, 0, -1)  # (h, w, 3)
                     else:
-                        tile = zarr_arr[0, channel_number, z, y0:y1, x0:x1]  # (h, w)
+                        tile = as_native(zarr_arr[0, channel_number, z, y0:y1, x0:x1])  # (h, w)
 
                     # Convert uint16 to uint8 if needed (JPEG requires 8-bit,
                     # or if pixel_type explicitly requests uint8)
@@ -1014,14 +1026,14 @@ class OMETiff:
 
             if num_z == 1:
                 # Single Z-plane, just load it directly
-                plane = series.zarr_series['0'][0, channel_number, 0, :, :]
+                plane = as_native(series.zarr_series['0'][0, channel_number, 0, :, :])
                 series.projection = plane[np.newaxis, np.newaxis, :, :]  # Add C and Z dims
                 log_memory(f'single Z-plane loaded (shape={series.projection.shape})')
             else:
                 # Incremental projection computation
                 proj = None
                 for z in range(num_z):
-                    plane = series.zarr_series['0'][0, channel_number, z, :, :]
+                    plane = as_native(series.zarr_series['0'][0, channel_number, z, :, :])
 
                     if z == 0:
                         # Initialize projection with first plane
@@ -1862,7 +1874,7 @@ def convert_to_ome_tiff(image_path: str) -> OMETiff:
 
     for series in ome_contents.series:
         log_memory(f'convert_to_ome_tiff: loading series {series.Number}')
-        image = series.zarr_series['0'][0, :, :, :, :]
+        image = as_native(series.zarr_series['0'][0, :, :, :, :])
         logger.info(f'image.shape: {image.shape}')
         log_memory(f'after loading image (shape={image.shape}, nbytes={image.nbytes / (1024**2):.1f} MiB)')
 
