@@ -1418,7 +1418,7 @@ class OMETiff:
             return set()
         try:
             result = subprocess.run(
-                [SHOWINF_CMD, '-nopix', '-noflat', infile],
+                [SHOWINF_CMD, '-nopix', '-noflat', '-no-sas', infile],
                 env=BF_ENV, check=True, capture_output=True, universal_newlines=True
             )
         except Exception as ev:
@@ -1430,23 +1430,24 @@ class OMETiff:
         flags: set[int] = set()
         current: Optional[int] = None
         for line in result.stdout.splitlines():
-            match = re.match(r'Series count\s*=\s*(\d+)\s*$', line)
+            match = re.match(r'\s*Series count\s*=\s*(\d+)\s*$', line)
             if match:
                 series_count = int(match.group(1))
                 continue
-            match = re.match(r'Series #(\d+)\s*:', line)
+            match = re.match(r'\s*Series #(\d+)\s*:', line)
             if match:
                 current = int(match.group(1))
                 seen.add(current)
             elif current is not None and re.match(r'\s*Thumbnail series\s*=\s*true\s*$', line, re.I):
                 flags.add(current)
 
-        # If the report does not look the way we expect, act on nothing rather than on a
-        # partial parse: showinf's format could change under a future Bio-Formats.
-        if series_count is None or len(seen) != series_count:
+        # Act on nothing unless the report parsed exactly as expected: the series numbers index
+        # the zarr groups, so anything other than a full 0..count-1 set could mark the wrong
+        # series as a thumbnail and silently drop a scene.
+        if series_count is None or seen != set(range(series_count)):
             logger.warning(
                 f'unexpected showinf report for {infile} '
-                f'(series count {series_count}, parsed {len(seen)}); ignoring thumbnail flags'
+                f'(series count {series_count}, parsed {sorted(seen)}); ignoring thumbnail flags'
             )
             return set()
 
