@@ -333,7 +333,7 @@ class OMETiff:
             self.Image = ometiff.omexml.find(f'ome:Image[{series_number + 1}]', self.ns)
             self.ome_mods: dict[str, str] = {}
             self.Interleaved = False
-            self.Thumbnail = True if (self.Name == 'label image' or self.Name == 'macro image') else False
+            self.Thumbnail = self.Name in ('label image', 'macro image') or series_number in ometiff.thumbnail_flags
             channels = self.Pixels.findall('./ome:Channel', self.ns)
             self.projection: Optional[np.ndarray] = None
             self.channel_names: list[str] = []
@@ -850,12 +850,14 @@ class OMETiff:
         fw.close()
         shutil.move(temp_xml_file, xml_file)
 
-    def __init__(self, filename: str, force_rgb: bool = False) -> None:
+    def __init__(self, filename: str, force_rgb: bool = False, source_path: Optional[str] = None) -> None:
         """Initialize OMETiff from a zarr file.
 
         Args:
             filename: Path to the zarr file.
             force_rgb: If True, force treating images as RGB.
+            source_path: Path to the original image, used to read Bio-Formats' thumbnail
+                flags (the zarr does not carry them). Omit to fall back to the name check.
         """
         self.filename = filename
         self.filebase = re.sub(r'\.zarr$', '', os.path.basename(filename))
@@ -880,6 +882,9 @@ class OMETiff:
 
         # Parse OME-XML metadata, handling namespace issues
         self._load_source_metadata(f"{os.path.dirname(filename)}/SOURCEMETADATA.ome.xml")
+
+        # Must precede series creation: OMETiffSeries consults it to set self.Thumbnail.
+        self.thumbnail_flags = OMETiff.thumbnail_series(source_path) if source_path else set()
 
         # Create series objects for each non-OME group in zarr
         for series_number, series in self.zarr_data.groups():
@@ -947,11 +952,16 @@ class OMETiff:
             metadata.write(cls.source_metadata(image_path))
         self._load_source_metadata(meta_path)
 
-        # Series come from the OME-XML Image elements (not zarr groups); drop label/macro thumbnails.
+        # Must precede series creation: OMETiffSeries consults it to set self.Thumbnail.
+        self.thumbnail_flags = OMETiff.thumbnail_series(image_path)
+
+        # Series come from the OME-XML Image elements (not zarr groups); drop thumbnails.
         for n in range(len(self.omexml.getroot().findall('.//ome:Image', self.ns))):
             series = OMETiff.OMETiffSeries(self, n, None)   # no zarr group; metadata from OME-XML
-            if not series.Thumbnail:
-                self.series.append(series)
+            if series.Thumbnail:
+                logger.info(f'skipping thumbnail series {n} ({series.Name!r})')
+                continue
+            self.series.append(series)
 
         for i in self.series:
             for z in range(i.SizeZ):
@@ -1391,6 +1401,60 @@ class OMETiff:
         return result.stdout
 
     @staticmethod
+    def thumbnail_series(infile: str) -> set[int]:
+        """Series numbers Bio-Formats reports as thumbnails (macro, label, embedded overviews).
+
+        Needed because the OME-XML consumed everywhere else does not carry this flag; only
+        showinf's text report does, hence a second showinf call (`-nopix`, so metadata only).
+        Without it thumbnails are recognized by name alone ('label image' / 'macro image'),
+        which misses any the reader names generically ('<file> #3') or reports as pyramid
+        levels, and those end up published as bogus catalog scenes.
+
+        Fails safe: any error, or a report we cannot parse cleanly, yields an empty set, which
+        leaves callers on the name check (i.e. previous behaviour). Marking a real series as a
+        thumbnail would silently drop a scene, so the parse is deliberately strict.
+        """
+        if is_zarr(infile):
+            return set()
+        try:
+            result = subprocess.run(
+                [SHOWINF_CMD, '-nopix', '-noflat', '-no-sas', infile],
+                env=BF_ENV, check=True, capture_output=True, universal_newlines=True
+            )
+        except Exception as ev:
+            logger.warning(f'could not read thumbnail flags for {infile}: {ev}')
+            return set()
+
+        series_count: Optional[int] = None
+        seen: set[int] = set()
+        flags: set[int] = set()
+        current: Optional[int] = None
+        for line in result.stdout.splitlines():
+            match = re.match(r'\s*Series count\s*=\s*(\d+)\s*$', line)
+            if match:
+                series_count = int(match.group(1))
+                continue
+            match = re.match(r'\s*Series #(\d+)\s*:', line)
+            if match:
+                current = int(match.group(1))
+                seen.add(current)
+            elif current is not None and re.match(r'\s*Thumbnail series\s*=\s*true\s*$', line, re.I):
+                flags.add(current)
+
+        # Act on nothing unless the report parsed exactly as expected: the series numbers index
+        # the zarr groups, so anything other than a full 0..count-1 set could mark the wrong
+        # series as a thumbnail and silently drop a scene.
+        if series_count is None or seen != set(range(series_count)):
+            logger.warning(
+                f'unexpected showinf report for {infile} '
+                f'(series count {series_count}, parsed {sorted(seen)}); ignoring thumbnail flags'
+            )
+            return set()
+
+        logger.info(f'bio-formats thumbnail series for {os.path.basename(infile)}: {sorted(flags)}')
+        return flags
+
+    @staticmethod
     def xml2json(xmlfile: str) -> dict[str, Any]:
         """Convert an XML metadata file to a dictionary.
 
@@ -1714,7 +1778,7 @@ def seadragon_tiffs(
     filename = f'{filename}/{filename}'
 
     # Load metadata
-    ome_contents = OMETiff(zarr_file, force_rgb=force_rgb)
+    ome_contents = OMETiff(zarr_file, force_rgb=force_rgb, source_path=image_path)
 
     # Process each series
     for series in ome_contents.series:
@@ -1800,7 +1864,7 @@ def projection_ome_tiff(
 
     filename = f'{filename}/{filename}'
 
-    ome_contents = OMETiff(zarr_file, force_rgb=force_rgb)
+    ome_contents = OMETiff(zarr_file, force_rgb=force_rgb, source_path=image_path)
     logger.info(f'NUMBER_OF_SERIES: {len(ome_contents.series)}')
 
     outfile = ome_contents.generate_projection_ome_tiff(
@@ -1840,7 +1904,7 @@ def convert_to_ome_tiff(image_path: str) -> OMETiff:
 
     filename = f'{filename}/{filename}'
 
-    ome_contents = OMETiff(zarr_file)
+    ome_contents = OMETiff(zarr_file, source_path=image_path)
     logger.info(f'NUMBER_OF_SERIES: {len(ome_contents.series)}')
 
     # Load and process metadata
