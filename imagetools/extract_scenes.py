@@ -1397,8 +1397,15 @@ class OMETiff:
         )
         if result.stderr:
             logger.info(result.stderr)
+
+        xml = result.stdout
+        if tiff_declares_unitless_resolution(infile):
+            logger.info(f'{infile}: TIFF declares ResolutionUnit=NONE; '
+                        'dropping fabricated PhysicalSizeX/Y from Bio-Formats metadata')
+            xml = re.sub(r'\s+PhysicalSize[XY](?:Unit)?="[^"]*"', '', xml)
+
         logger.info(f'execution time: {time.time() - start_time:.2f}')
-        return result.stdout
+        return xml
 
     @staticmethod
     def thumbnail_series(infile: str) -> set[int]:
@@ -1559,6 +1566,20 @@ def is_zarr(filename: str) -> bool:
         True if path contains zarr metadata file.
     """
     return os.path.exists(f"{filename}/OME/METADATA.ome.xml") and os.path.exists(f"{filename}")
+
+
+def tiff_declares_unitless_resolution(path: str) -> bool:
+    """True when a TIFF explicitly sets ResolutionUnit (tag 296) to NONE, i.e. its
+    X/YResolution values carry no absolute unit. Bio-Formats reads those as
+    pixels-per-µm and fabricates PhysicalSizeX/Y; callers use this to drop them.
+    Absent tag means inch per the spec, and any read error returns False (fail safe).
+    """
+    try:
+        with TiffFile(path) as tif:
+            unit = tif.pages[0].tags.get('ResolutionUnit')
+            return unit is not None and int(unit.value) == 1
+    except Exception:
+        return False
 
 
 def get_omexml(file: str) -> ET.ElementTree:
@@ -1921,20 +1942,20 @@ def convert_to_ome_tiff(image_path: str) -> OMETiff:
 
     outfile = OME_TIF_FILE.format(file=filename)
 
+    pixels_meta = metadata['OME']['Image']['Pixels']
     options: dict[str, Any] = dict(metadata={
-        'PhysicalSizeX': metadata['OME']['Image']['Pixels']['@PhysicalSizeX'],
-        'PhysicalSizeXUnit': metadata['OME']['Image']['Pixels']['@PhysicalSizeXUnit'],
-        'PhysicalSizeY': metadata['OME']['Image']['Pixels']['@PhysicalSizeY'],
-        'PhysicalSizeYUnit': metadata['OME']['Image']['Pixels']['@PhysicalSizeYUnit'],
-        'PhysicalSizeZ': metadata['OME']['Image']['Pixels']['@PhysicalSizeZ'],
-        'PhysicalSizeZUnit': metadata['OME']['Image']['Pixels']['@PhysicalSizeZUnit'],
-        'BigEndian': metadata['OME']['Image']['Pixels']['@BigEndian'],
-        'SignificantBits': metadata['OME']['Image']['Pixels']['@SignificantBits'],
-        'Type': metadata['OME']['Image']['Pixels']['@Type'],
+        'BigEndian': pixels_meta['@BigEndian'],
+        'SignificantBits': pixels_meta['@SignificantBits'],
+        'Type': pixels_meta['@Type'],
         'AcquisitionDate': metadata['OME']['Image']['AcquisitionDate'],
         'axes': 'CZYX',
         'Channel': metadata_channels
     })
+    # Physical sizes are optional (absent e.g. when the source declares no resolution unit)
+    for k in ('PhysicalSizeX', 'PhysicalSizeXUnit', 'PhysicalSizeY', 'PhysicalSizeYUnit',
+              'PhysicalSizeZ', 'PhysicalSizeZUnit'):
+        if f'@{k}' in pixels_meta:
+            options['metadata'][k] = pixels_meta[f'@{k}']
 
     for series in ome_contents.series:
         log_memory(f'convert_to_ome_tiff: loading series {series.Number}')
