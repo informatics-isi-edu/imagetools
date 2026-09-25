@@ -195,6 +195,10 @@ def run(
 ) -> int:
 ```
 
+## Known Limitations
+
+See [Known Limitations](docs/known-limitations.md).
+
 ## Other Tools
 
 Additional CLI tools are available:
